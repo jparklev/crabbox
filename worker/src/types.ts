@@ -32,6 +32,12 @@ export interface Env {
   CRABBOX_MAX_MONTHLY_USD?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_OWNER?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_ORG?: string;
+  CRABBOX_MPP_RECIPIENT?: string;
+  CRABBOX_MPP_CURRENCY?: string;
+  CRABBOX_MPP_DECIMALS?: string;
+  CRABBOX_MPP_SECRET_KEY?: string;
+  CRABBOX_MPP_TESTNET?: string;
+  CRABBOX_MPP_REALM?: string;
 }
 
 export interface LeaseRequest {
@@ -47,6 +53,7 @@ export interface LeaseRequest {
   image?: string;
   awsRegion?: string;
   awsAMI?: string;
+  imageTag?: string;
   awsSGID?: string;
   awsSubnetID?: string;
   awsProfile?: string;
@@ -71,6 +78,12 @@ export interface LeaseRequest {
 }
 
 export type Provider = "hetzner" | "aws";
+
+export interface LeaseExtension {
+  at: string;
+  ttlSecondsAdded: number;
+  amountUSD: number;
+}
 
 export interface LeaseRecord {
   id: string;
@@ -105,6 +118,8 @@ export interface LeaseRecord {
   expiresAt: string;
   releasedAt?: string;
   endedAt?: string;
+  extensions?: LeaseExtension[];
+  totalChargedUSD?: number;
 }
 
 export interface ProvisioningAttempt {
@@ -123,6 +138,7 @@ export interface ProviderImage {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  tag?: string;
 }
 
 export interface RunRecord {
@@ -241,6 +257,15 @@ export interface HetznerSSHKey {
   name: string;
   fingerprint: string;
   public_key: string;
+}
+
+export interface HetznerImage {
+  id: number;
+  description: string | null;
+  status: "creating" | "available" | "unavailable";
+  type: "snapshot" | "system" | "backup" | "app" | "temporary";
+  labels: Record<string, string>;
+  created: string;
 }
 
 export interface MachineView {

@@ -89,7 +89,7 @@ export class EC2SpotClient {
     await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
     const imageID = await this.resolveAMI(config);
     const securityGroupID = await this.ensureSecurityGroup(config);
-    const candidates = awsLaunchCandidates(config);
+    const candidates = config.strictServerType ? [config.serverType] : awsLaunchCandidates(config);
     const failures: string[] = [];
     const attempts: ProvisioningAttempt[] = [];
     const quotaCache = new Map<string, number | undefined>();

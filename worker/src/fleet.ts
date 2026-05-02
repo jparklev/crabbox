@@ -1,9 +1,10 @@
-import { isAdminRequest } from "./auth";
+import { isAdminRequest, issueLeaseToken, requestLeaseAuth } from "./auth";
 import { EC2SpotClient } from "./aws";
 import { leaseConfig, validCIDRs } from "./config";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute } from "./oauth";
+import { formatAmountUSD, isChallenge, paymentGuardFromEnv, type PaymentGuard } from "./payments";
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
 import type {
   Env,
@@ -31,10 +32,13 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 export class FleetDurableObject implements DurableObject {
+  private cachedPaymentGuard: PaymentGuard | null | undefined;
+
   constructor(
     private readonly state: DurableObjectState,
     private readonly env: Env,
     private readonly testProviders: Partial<Record<Provider, CloudProvider>> = {},
+    private readonly testPaymentGuard?: PaymentGuard,
   ) {}
 
   async fetch(request: Request): Promise<Response> {
@@ -115,13 +119,21 @@ export class FleetDurableObject implements DurableObject {
   private async createLease(request: Request): Promise<Response> {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
+    const requestForPayment = request.clone();
     const input = await readJson<LeaseRequest>(request);
     const config = leaseConfig(input);
     if (config.provider === "aws" && config.awsSSHCIDRs.length === 0) {
       config.awsSSHCIDRs = requestSourceCIDRs(request);
     }
+    const imageTag = normalizeTag(input.imageTag);
     if (config.provider === "aws" && !config.awsAMI) {
-      config.awsAMI = (await this.promotedAWSImage())?.id ?? "";
+      config.awsAMI = (await this.promotedImage("aws", imageTag))?.id ?? "";
+    }
+    if (config.provider === "hetzner" && input.image === undefined) {
+      const promoted = await this.promotedImage("hetzner", imageTag);
+      if (promoted) {
+        config.image = promoted.id;
+      }
     }
     const leaseID = validLeaseID(input.leaseID) ? input.leaseID : newLeaseID();
     const leases = await this.leaseRecords();
@@ -183,6 +195,18 @@ export class FleetDurableObject implements DurableObject {
     if (limitError) {
       return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
     }
+    const guard = this.paymentGuard();
+    let attachReceipt: ((response: Response) => Response) | undefined;
+    if (guard) {
+      const charged = await guard.charge(formatAmountUSD(cost.maxUSD))(requestForPayment);
+      if (isChallenge(charged)) {
+        return charged.challenge;
+      }
+      attachReceipt = (response) => charged.withReceipt(response);
+      // Once the agent has paid for the requested serverType, the broker must
+      // not silently substitute a cheaper one via fallback candidates.
+      config.strictServerType = true;
+    }
     const { server, serverType, attempts } = await provider.createServerWithFallback(
       config,
       leaseID,
@@ -214,7 +238,31 @@ export class FleetDurableObject implements DurableObject {
     }
     await this.putLease(record);
     await this.scheduleAlarm();
-    return json({ lease: record }, { status: 201 });
+    const responseBody: { lease: LeaseRecord; bearer?: string } = { lease: record };
+    if (request.headers.get("x-crabbox-auth") === "mpp") {
+      responseBody.bearer = await issueLeaseToken(this.env, {
+        leaseID: record.id,
+        owner: record.owner,
+        org: record.org,
+        ttlSeconds: record.ttlSeconds,
+      });
+    }
+    const response = json(responseBody, { status: 201 });
+    return attachReceipt ? attachReceipt(response) : response;
+  }
+
+  private paymentGuard(): PaymentGuard | undefined {
+    if (this.testPaymentGuard) {
+      return this.testPaymentGuard;
+    }
+    if (this.cachedPaymentGuard === undefined) {
+      try {
+        this.cachedPaymentGuard = paymentGuardFromEnv(this.env, this.state.storage) ?? null;
+      } catch {
+        this.cachedPaymentGuard = null;
+      }
+    }
+    return this.cachedPaymentGuard ?? undefined;
   }
 
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {
@@ -245,10 +293,79 @@ export class FleetDurableObject implements DurableObject {
       await this.scheduleAlarm();
       return json({ lease });
     }
+    if (method === "POST" && action === "extend") {
+      return this.extendLease(request, leaseID);
+    }
     if (method === "POST" && action === "release") {
       return this.releaseLease(request, leaseID, false);
     }
     return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async extendLease(request: Request, leaseID: string): Promise<Response> {
+    const requestForPayment = request.clone();
+    const body = await optionalJson<{ ttlSecondsAdded?: number }>(request);
+    const lease = await this.getLease(leaseID);
+    if (!lease) {
+      return notFound();
+    }
+    if (lease.state !== "active") {
+      return json({ error: "lease_not_active" }, { status: 409 });
+    }
+    // If a credential is attached the payer is known; reject mismatched
+    // wallets before charging anyone.
+    const hasPaymentCredential = request.headers
+      .get("authorization")
+      ?.toLowerCase()
+      .startsWith("payment ");
+    if (hasPaymentCredential && !this.leaseVisibleToRequest(lease, request, false)) {
+      return json({ error: "owner_mismatch" }, { status: 403 });
+    }
+    const requested = Number.isFinite(body.ttlSecondsAdded) ? Number(body.ttlSecondsAdded) : 300;
+    const ttlSecondsAdded = Math.max(60, Math.min(Math.trunc(requested), 3600));
+    const hourlyUSD = lease.estimatedHourlyUSD ?? 0;
+    const extendUSD = (hourlyUSD * ttlSecondsAdded) / 3600;
+    const limitError = enforceCostLimits(
+      await this.leaseRecords(),
+      { ...lease, maxEstimatedUSD: (lease.maxEstimatedUSD ?? 0) + extendUSD },
+      costLimits(this.env),
+      new Date(),
+    );
+    if (limitError) {
+      return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
+    }
+    const guard = this.paymentGuard();
+    let attachReceipt: ((response: Response) => Response) | undefined;
+    if (guard) {
+      const charged = await guard.charge(formatAmountUSD(extendUSD))(requestForPayment);
+      if (isChallenge(charged)) {
+        return charged.challenge;
+      }
+      attachReceipt = (response) => charged.withReceipt(response);
+    } else if (!this.leaseVisibleToRequest(lease, request, false)) {
+      // Non-MPP path: visibility was deferred since we let unauth lookups peek
+      // for the rate. Now that no payment will be charged, owner must match.
+      return json({ error: "not_found" }, { status: 404 });
+    }
+    const now = new Date();
+    lease.ttlSeconds += ttlSecondsAdded;
+    lease.maxEstimatedUSD = (lease.maxEstimatedUSD ?? 0) + extendUSD;
+    lease.totalChargedUSD = (lease.totalChargedUSD ?? lease.maxEstimatedUSD ?? 0) + extendUSD;
+    lease.updatedAt = now.toISOString();
+    lease.lastTouchedAt = now.toISOString();
+    lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
+    if (!lease.extensions) {
+      lease.extensions = [];
+    }
+    lease.extensions.push({
+      at: now.toISOString(),
+      ttlSecondsAdded,
+      amountUSD: extendUSD,
+    });
+    await this.putLease(lease);
+    await this.scheduleAlarm();
+    const response = json({ lease });
+    return attachReceipt ? attachReceipt(response) : response;
   }
 
   private async releaseLease(request: Request, leaseID: string, admin: boolean): Promise<Response> {
@@ -513,11 +630,13 @@ export class FleetDurableObject implements DurableObject {
     const runs = await this.runRecords();
     const scopedOwner = admin ? owner : requestOwner(request);
     const scopedOrg = admin ? org : requestOrg(request, this.env);
+    const leaseScope = admin ? "" : requestLeaseAuth(request);
     return json({
       runs: runs
         .filter((run) => !leaseID || run.leaseID === leaseID)
         .filter((run) => !scopedOwner || run.owner === scopedOwner)
         .filter((run) => !scopedOrg || run.org === scopedOrg)
+        .filter((run) => !leaseScope || run.leaseID === leaseScope)
         .filter((run) => !state || run.state === state)
         .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
         .slice(0, limit),
@@ -526,8 +645,15 @@ export class FleetDurableObject implements DurableObject {
 
   private async usage(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const requestedScope = url.searchParams.get("scope") ?? "user";
     const admin = isAdminRequest(request);
+    const leaseScope = admin ? "" : requestLeaseAuth(request);
+    if (leaseScope) {
+      return json(
+        { error: "forbidden", message: "lease tokens cannot read usage" },
+        { status: 403 },
+      );
+    }
+    const requestedScope = url.searchParams.get("scope") ?? "user";
     const scope =
       admin && (requestedScope === "org" || requestedScope === "all" || requestedScope === "user")
         ? requestedScope
@@ -562,18 +688,25 @@ export class FleetDurableObject implements DurableObject {
     if (!lease) {
       return notFound();
     }
-    if (lease.provider !== "aws" || !lease.cloudID) {
-      return json(
-        { error: "unsupported_provider", message: "only AWS leases can be imaged" },
-        { status: 400 },
+    if (lease.provider === "aws") {
+      if (!lease.cloudID) {
+        return json({ error: "lease_not_provisioned" }, { status: 400 });
+      }
+      const image = await this.provider("aws", lease.region).createImage(
+        lease.cloudID,
+        name,
+        input.noReboot ?? true,
       );
+      return json({ image }, { status: 201 });
     }
-    const image = await this.provider("aws", lease.region).createImage(
-      lease.cloudID,
-      name,
-      input.noReboot ?? true,
-    );
-    return json({ image }, { status: 201 });
+    if (lease.provider === "hetzner") {
+      if (!lease.serverID) {
+        return json({ error: "lease_not_provisioned" }, { status: 400 });
+      }
+      const image = await this.provider("hetzner").createImage(String(lease.serverID), name, false);
+      return json({ image }, { status: 201 });
+    }
+    return json({ error: "unsupported_provider" }, { status: 400 });
   }
 
   private async imageRoute(request: Request, imageID: string, action?: string): Promise<Response> {
@@ -581,20 +714,27 @@ export class FleetDurableObject implements DurableObject {
     if (!validImageID(imageID)) {
       return json({ error: "invalid_image_id" }, { status: 400 });
     }
+    const provider: Provider = imageID.startsWith("ami-") ? "aws" : "hetzner";
     if (method === "GET" && action === undefined) {
-      const image = await this.provider("aws").getImage(imageID);
+      const image = await this.provider(provider).getImage(imageID);
       return json({ image });
     }
     if (method === "POST" && action === "promote") {
-      const image = await this.provider("aws").getImage(imageID);
+      const body = await optionalJson<{ tag?: string }>(request);
+      const tag = normalizeTag(body.tag);
+      const image = await this.provider(provider).getImage(imageID);
       if (image.state !== "available") {
         return json(
           { error: "image_not_available", message: `image ${imageID} is ${image.state}` },
           { status: 409 },
         );
       }
-      const promoted: PromotedImageRecord = { ...image, promotedAt: new Date().toISOString() };
-      await this.state.storage.put(promotedAWSImageKey(), promoted);
+      const promoted: PromotedImageRecord = {
+        ...image,
+        tag,
+        promotedAt: new Date().toISOString(),
+      };
+      await this.state.storage.put(promotedImageKey(provider, tag), promoted);
       return json({ image: promoted });
     }
     return json({ error: "not_found" }, { status: 404 });
@@ -691,31 +831,46 @@ export class FleetDurableObject implements DurableObject {
   private filterLeasesForRequest(leases: LeaseRecord[], request: Request): LeaseRecord[] {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
-    return this.filterLeases(leases, request).filter(
-      (lease) => lease.owner === owner && lease.org === org,
-    );
+    const leaseScope = requestLeaseAuth(request);
+    return this.filterLeases(leases, request).filter((lease) => {
+      if (lease.owner !== owner || lease.org !== org) {
+        return false;
+      }
+      return !leaseScope || leaseScope === lease.id;
+    });
   }
 
   private leaseVisibleToRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {
-    return (
-      admin ||
-      (lease.owner === requestOwner(request) && lease.org === requestOrg(request, this.env))
-    );
+    if (admin) {
+      return true;
+    }
+    if (lease.owner !== requestOwner(request) || lease.org !== requestOrg(request, this.env)) {
+      return false;
+    }
+    const leaseScope = requestLeaseAuth(request);
+    return !leaseScope || leaseScope === lease.id;
   }
 
   private runVisibleToRequest(run: RunRecord, request: Request): boolean {
-    return (
-      isAdminRequest(request) ||
-      (run.owner === requestOwner(request) && run.org === requestOrg(request, this.env))
-    );
+    if (isAdminRequest(request)) {
+      return true;
+    }
+    if (run.owner !== requestOwner(request) || run.org !== requestOrg(request, this.env)) {
+      return false;
+    }
+    const leaseScope = requestLeaseAuth(request);
+    return !leaseScope || leaseScope === run.leaseID;
   }
 
   private async putLease(lease: LeaseRecord): Promise<void> {
     await this.state.storage.put(leaseKey(lease.id), lease);
   }
 
-  private async promotedAWSImage(): Promise<PromotedImageRecord | undefined> {
-    return this.state.storage.get<PromotedImageRecord>(promotedAWSImageKey());
+  private async promotedImage(
+    provider: Provider,
+    tag: string,
+  ): Promise<PromotedImageRecord | undefined> {
+    return this.state.storage.get<PromotedImageRecord>(promotedImageKey(provider, tag));
   }
 
   private async getRun(runID: string): Promise<RunRecord | undefined> {
@@ -795,8 +950,13 @@ function runEventKey(runID: string, seq: number): string {
   return `${runEventPrefix(runID)}${String(seq).padStart(12, "0")}`;
 }
 
-function promotedAWSImageKey(): string {
-  return "image:aws:promoted";
+function promotedImageKey(provider: Provider, tag: string): string {
+  return `image:${provider}:promoted:${tag}`;
+}
+
+function normalizeTag(tag: string | undefined): string {
+  const trimmed = (tag ?? "").trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(trimmed) ? trimmed : "latest";
 }
 
 function newLeaseID(): string {
@@ -816,7 +976,10 @@ function validLeaseID(value: string | undefined): value is string {
 }
 
 function validImageID(value: string | undefined): value is string {
-  return typeof value === "string" && /^ami-[a-f0-9]{8,32}$/.test(value);
+  if (typeof value !== "string") {
+    return false;
+  }
+  return /^ami-[a-f0-9]{8,32}$/.test(value) || /^[1-9][0-9]{0,18}$/.test(value);
 }
 
 function validImageName(value: string): boolean {
@@ -1201,12 +1364,12 @@ class HetznerProvider implements CloudProvider {
     await this.client.deleteServer(Number(id));
   }
 
-  createImage(): Promise<ProviderImage> {
-    throw new Error("hetzner images are not supported");
+  createImage(serverID: string, name: string): Promise<ProviderImage> {
+    return this.client.createImage(Number(serverID), name);
   }
 
-  getImage(): Promise<ProviderImage> {
-    throw new Error("hetzner images are not supported");
+  getImage(imageID: string): Promise<ProviderImage> {
+    return this.client.getImage(imageID);
   }
 
   async deleteSSHKey(name: string): Promise<void> {

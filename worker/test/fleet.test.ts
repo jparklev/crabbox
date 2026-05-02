@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { FleetDurableObject } from "../src/fleet";
+import type { PaymentGuard } from "../src/payments";
 import type { Env, LeaseRecord, ProvisioningAttempt, RunRecord } from "../src/types";
 
 class MemoryStorage {
@@ -375,9 +376,493 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(promoted.status).toBe(200);
-    expect(storage.value("image:aws:promoted")).toEqual(
+    expect(storage.value("image:aws:promoted:latest")).toEqual(
       expect.objectContaining({ id: "ami-000000000001", state: "available" }),
     );
+  });
+
+  it("creates and promotes Hetzner snapshots through admin routes", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, { imageID: "382206402" }),
+    });
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        provider: "hetzner",
+        serverID: 128794819,
+        cloudID: "128794819",
+      }),
+    );
+
+    const created = await fleet.fetch(
+      request("POST", "/v1/images", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { leaseID: "cbx_000000000002", name: "crabbox-rust-stable" },
+      }),
+    );
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { image: { id: string; state: string } };
+    expect(createdBody.image).toEqual(
+      expect.objectContaining({ id: "382206402", state: "pending" }),
+    );
+
+    const promoted = await fleet.fetch(
+      request("POST", "/v1/images/382206402/promote", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+    expect(promoted.status).toBe(200);
+    expect(storage.value("image:hetzner:promoted:latest")).toEqual(
+      expect.objectContaining({ id: "382206402", state: "available" }),
+    );
+  });
+
+  it("uses promoted Hetzner image when lease request omits image", async () => {
+    const storage = new MemoryStorage();
+    let observedImage = "";
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider((config) => {
+        observedImage = config.image ?? "";
+      }),
+    });
+    storage.seed("image:hetzner:promoted:latest", {
+      id: "382206402",
+      name: "crabbox-rust-stable",
+      state: "available",
+      promotedAt: "2026-05-01T00:00:00.000Z",
+    });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_111111111111",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    expect(observedImage).toBe("382206402");
+  });
+
+  it("returns 402 from POST /v1/leases when a payment guard is configured and no payment is attached", async () => {
+    let createdServer = false;
+    const guard: PaymentGuard = {
+      charge: (amount: string) => async () => ({
+        status: 402,
+        challenge: new Response(null, {
+          status: 402,
+          headers: {
+            "www-authenticate": `Payment realm="crabbox", method="tempo", amount="${amount}"`,
+          },
+        }),
+      }),
+    };
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {
+        hetzner: fakeProvider(() => {
+          createdServer = true;
+        }),
+      },
+      guard,
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_aaaaaaaaaaaa",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(402);
+    expect(create.headers.get("www-authenticate")).toContain('method="tempo"');
+    expect(createdServer).toBe(false);
+  });
+
+  it("issues a lease bearer for MPP-authenticated lease creation", async () => {
+    const guard: PaymentGuard = {
+      charge: () => async () => ({
+        withReceipt: (response: Response) => response,
+      }),
+    };
+    const fleet = testFleet(new MemoryStorage(), { hetzner: fakeProvider() }, guard);
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-auth": "mpp",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          authorization: "Payment stub-credential",
+        },
+        body: {
+          leaseID: "cbx_cccccccccccc",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const body = (await create.json()) as { lease: LeaseRecord; bearer?: string };
+    expect(body.bearer).toMatch(/^cbxl_/);
+    expect(body.lease.id).toBe("cbx_cccccccccccc");
+    expect(body.lease.owner).toBe("mpp:0xfeed");
+  });
+
+  it("scopes list-leases to the lease bearer", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_lease_xxxxx",
+      testLease({ id: "cbx_lease_xxxxx", owner: "mpp:0xfeed", org: "openclaw" }),
+    );
+    storage.seed(
+      "lease:cbx_lease_yyyyy",
+      testLease({ id: "cbx_lease_yyyyy", owner: "mpp:0xfeed", org: "openclaw" }),
+    );
+
+    const list = await fleet.fetch(
+      request("GET", "/v1/leases", {
+        headers: {
+          "x-crabbox-auth": "lease",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-lease-id": "cbx_lease_xxxxx",
+        },
+      }),
+    );
+    expect(list.status).toBe(200);
+    const body = (await list.json()) as { leases: LeaseRecord[] };
+    expect(body.leases.map((l) => l.id)).toEqual(["cbx_lease_xxxxx"]);
+  });
+
+  it("forbids usage reads from lease bearers", async () => {
+    const fleet = testFleet();
+    const usage = await fleet.fetch(
+      request("GET", "/v1/usage", {
+        headers: {
+          "x-crabbox-auth": "lease",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-lease-id": "cbx_anything",
+        },
+      }),
+    );
+    expect(usage.status).toBe(403);
+  });
+
+  it("scopes lease bearer access to a single lease ID", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_lease_aaaaa",
+      testLease({
+        id: "cbx_lease_aaaaa",
+        owner: "mpp:0xfeed",
+        org: "openclaw",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_lease_bbbbb",
+      testLease({
+        id: "cbx_lease_bbbbb",
+        owner: "mpp:0xfeed",
+        org: "openclaw",
+      }),
+    );
+
+    const ownLease = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_lease_aaaaa", {
+        headers: {
+          "x-crabbox-auth": "lease",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-lease-id": "cbx_lease_aaaaa",
+        },
+      }),
+    );
+    expect(ownLease.status).toBe(200);
+
+    const otherLease = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_lease_bbbbb", {
+        headers: {
+          "x-crabbox-auth": "lease",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-lease-id": "cbx_lease_aaaaa",
+        },
+      }),
+    );
+    expect(otherLease.status).toBe(404);
+  });
+
+  it("does not issue a lease bearer for non-MPP auth", async () => {
+    const fleet = testFleet(new MemoryStorage(), { hetzner: fakeProvider() });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_dddddddddddd",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const body = (await create.json()) as { lease: LeaseRecord; bearer?: string };
+    expect(body.bearer).toBeUndefined();
+  });
+
+  it("extends a lease and bumps ttlSeconds when no payment guard is configured", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const createdAt = new Date();
+    const initialExpiresAt = new Date(createdAt.getTime() + 600 * 1000);
+    storage.seed(
+      "lease:cbx_extendable01",
+      testLease({
+        id: "cbx_extendable01",
+        owner: "peter@example.com",
+        org: "openclaw",
+        createdAt: createdAt.toISOString(),
+        updatedAt: createdAt.toISOString(),
+        lastTouchedAt: createdAt.toISOString(),
+        ttlSeconds: 600,
+        idleTimeoutSeconds: 1800,
+        estimatedHourlyUSD: 0.1,
+        maxEstimatedUSD: 0.1,
+        expiresAt: initialExpiresAt.toISOString(),
+      }),
+    );
+
+    const extend = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_extendable01/extend", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: { ttlSecondsAdded: 300 },
+      }),
+    );
+    expect(extend.status).toBe(200);
+    const body = (await extend.json()) as { lease: LeaseRecord };
+    expect(body.lease.ttlSeconds).toBe(900);
+    expect(body.lease.extensions).toHaveLength(1);
+    expect(body.lease.extensions?.[0]?.ttlSecondsAdded).toBe(300);
+    expect(Date.parse(body.lease.expiresAt)).toBeGreaterThan(initialExpiresAt.getTime());
+  });
+
+  it("returns 402 from /extend when payment guard rejects", async () => {
+    const storage = new MemoryStorage();
+    const guard: PaymentGuard = {
+      charge: () => async () => ({
+        status: 402,
+        challenge: new Response(null, {
+          status: 402,
+          headers: {
+            "www-authenticate": 'Payment realm="crabbox", method="tempo", intent="charge"',
+          },
+        }),
+      }),
+    };
+    const fleet = testFleet(storage, {}, guard);
+    storage.seed(
+      "lease:cbx_unpaid000001",
+      testLease({
+        id: "cbx_unpaid000001",
+        owner: "mpp:0xfeed",
+        org: "default-org",
+        ttlSeconds: 600,
+        idleTimeoutSeconds: 1800,
+        estimatedHourlyUSD: 0.1,
+        maxEstimatedUSD: 0.1,
+        expiresAt: new Date(Date.now() + 600 * 1000).toISOString(),
+      }),
+    );
+    const extend = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_unpaid000001/extend", {
+        headers: {
+          "x-crabbox-auth": "mpp",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "default-org",
+        },
+        body: { ttlSecondsAdded: 300 },
+      }),
+    );
+    expect(extend.status).toBe(402);
+  });
+
+  it("rejects /extend on an inactive lease", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_inactive0001",
+      testLease({
+        id: "cbx_inactive0001",
+        owner: "peter@example.com",
+        org: "openclaw",
+        state: "released",
+      }),
+    );
+    const extend = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_inactive0001/extend", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: { ttlSecondsAdded: 300 },
+      }),
+    );
+    expect(extend.status).toBe(409);
+  });
+
+  it("provisions and attaches the receipt when payment guard accepts", async () => {
+    let receiptHeader = "";
+    const guard: PaymentGuard = {
+      charge: () => async () => ({
+        withReceipt: (response: Response) => {
+          const headers = new Headers(response.headers);
+          headers.set("payment-receipt", "stub-receipt-ok");
+          receiptHeader = "stub-receipt-ok";
+          return new Response(response.body, {
+            status: response.status,
+            headers,
+          });
+        },
+      }),
+    };
+    const fleet = testFleet(new MemoryStorage(), { hetzner: fakeProvider() }, guard);
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+          authorization: "Payment stub-credential",
+        },
+        body: {
+          leaseID: "cbx_bbbbbbbbbbbb",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    expect(create.headers.get("payment-receipt")).toBe("stub-receipt-ok");
+    expect(receiptHeader).toBe("stub-receipt-ok");
+  });
+
+  it("routes promoted Hetzner snapshots by tag", async () => {
+    const storage = new MemoryStorage();
+    let observedImage = "";
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(
+        (config) => {
+          observedImage = config.image ?? "";
+        },
+        { imageID: "382206999" },
+      ),
+    });
+
+    const promote = await fleet.fetch(
+      request("POST", "/v1/images/382206999/promote", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { tag: "rust-beast" },
+      }),
+    );
+    expect(promote.status).toBe(200);
+    expect(storage.value("image:hetzner:promoted:rust-beast")).toEqual(
+      expect.objectContaining({ id: "382206999", tag: "rust-beast" }),
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_777777777777",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          imageTag: "rust-beast",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    expect(observedImage).toBe("382206999");
+  });
+
+  it("respects explicit lease image even when a promoted Hetzner image exists", async () => {
+    const storage = new MemoryStorage();
+    let observedImage = "";
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider((config) => {
+        observedImage = config.image ?? "";
+      }),
+    });
+    storage.seed("image:hetzner:promoted:latest", {
+      id: "382206402",
+      name: "crabbox-rust-stable",
+      state: "available",
+      promotedAt: "2026-05-01T00:00:00.000Z",
+    });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_222222222222",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          image: "ubuntu-24.04",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    expect(observedImage).toBe("ubuntu-24.04");
   });
 });
 
@@ -485,7 +970,19 @@ describe("fleet run history", () => {
   });
 
   it("records finished runs and serves logs", async () => {
-    const fleet = testFleet();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "peter@example.com",
+        org: "openclaw",
+        provider: "aws",
+        class: "beast",
+        serverType: "c7a.48xlarge",
+      }),
+    );
     const ownerHeaders = {
       "x-crabbox-owner": "peter@example.com",
       "x-crabbox-org": "openclaw",
@@ -681,9 +1178,26 @@ describe("fleet run history", () => {
   });
 
   it("bounds stored result summaries", async () => {
-    const fleet = testFleet();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "peter@example.com",
+        org: "openclaw",
+        provider: "aws",
+        class: "beast",
+        serverType: "c7a.48xlarge",
+      }),
+    );
+    const headers = {
+      "x-crabbox-owner": "peter@example.com",
+      "x-crabbox-org": "openclaw",
+    };
     const create = await fleet.fetch(
       request("POST", "/v1/runs", {
+        headers,
         body: {
           leaseID: "cbx_000000000001",
           provider: "aws",
@@ -704,6 +1218,7 @@ describe("fleet run history", () => {
 
     const finish = await fleet.fetch(
       request("POST", `/v1/runs/${run.id}/finish`, {
+        headers,
         body: {
           exitCode: 1,
           log: "",
@@ -1050,29 +1565,40 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function testFleet(storage = new MemoryStorage(), providers = {}): FleetDurableObject {
+function testFleet(
+  storage = new MemoryStorage(),
+  providers = {},
+  paymentGuard?: PaymentGuard,
+): FleetDurableObject {
   return new FleetDurableObject(
     { storage } as unknown as DurableObjectState,
-    { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    {
+      CRABBOX_DEFAULT_ORG: "default-org",
+      CRABBOX_SESSION_SECRET: "test-session-secret",
+    } as Env,
     providers,
+    paymentGuard,
   );
 }
 
 function fakeProvider(
-  onCreate?: (config: { awsSSHCIDRs: string[] }) => void,
-  result: {
+  onCreate?: (config: { awsSSHCIDRs: string[]; image?: string }) => void,
+  options: {
     provider?: "hetzner" | "aws";
     serverType?: string;
     cloudID?: string;
     attempts?: ProvisioningAttempt[];
+    imageID?: string;
   } = {},
 ) {
+  const result = options;
+  const imageID = options.imageID ?? "ami-000000000001";
   return {
     async listCrabboxServers() {
       return [];
     },
     async createServerWithFallback(
-      config: { awsSSHCIDRs: string[] },
+      config: { awsSSHCIDRs: string[]; image?: string },
       _leaseID: string,
       slug: string,
     ) {
@@ -1094,11 +1620,11 @@ function fakeProvider(
     },
     async deleteServer() {},
     async createImage(_instanceID: string, name: string) {
-      return { id: "ami-000000000001", name, state: "pending", region: "eu-west-1" };
+      return { id: imageID, name, state: "pending", region: "eu-west-1" };
     },
-    async getImage(imageID: string) {
+    async getImage(id: string) {
       return {
-        id: imageID,
+        id,
         name: "openclaw-crabbox-test",
         state: "available",
         region: "eu-west-1",

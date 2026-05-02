@@ -24,6 +24,7 @@ type Config struct {
 	Access             AccessConfig
 	Location           string
 	Image              string
+	ImageTag           string
 	AWSRegion          string
 	AWSAMI             string
 	AWSSGID            string
