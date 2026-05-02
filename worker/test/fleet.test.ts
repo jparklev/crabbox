@@ -527,7 +527,7 @@ describe("fleet lease identity and idle", () => {
     );
     expect(create.status).toBe(201);
     const body = (await create.json()) as { lease: LeaseRecord; bearer?: string };
-    expect(body.bearer).toMatch(/^cbxl_/);
+    expect(body.bearer).toMatch(/^cbxu_/);
     expect(body.lease.id).toBe("cbx_cccccccccccc");
     expect(body.lease.owner).toBe("mpp:0xfeed");
   });

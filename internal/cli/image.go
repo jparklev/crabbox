@@ -48,11 +48,7 @@ func (a App) imageCreate(ctx context.Context, args []string) error {
 	if *id == "" || *name == "" {
 		return exit(2, "usage: crabbox image create --id <cbx_id> --name <ami-name> [--wait]")
 	}
-	coord, err := configuredAdminCoordinator()
-	if err != nil {
-		return err
-	}
-	cfg, err := loadConfig()
+	coord, cfg, err := configuredAdminCoordinatorWithConfig()
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,6 @@
-import { isAdminRequest, issueLeaseToken, requestLeaseAuth } from "./auth";
-import { EC2SpotClient } from "./aws";
-import { leaseConfig, validCIDRs } from "./config";
+import { isAdminRequest, issueLeaseToken, requestLeaseAuth, requestPayer } from "./auth";
+import { awsLaunchCandidates, EC2SpotClient } from "./aws";
+import { leaseConfig, serverTypeCandidatesForClass, validCIDRs } from "./config";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute } from "./oauth";
@@ -197,15 +197,18 @@ export class FleetDurableObject implements DurableObject {
     }
     const guard = this.paymentGuard();
     let attachReceipt: ((response: Response) => Response) | undefined;
+    let chargedUSD = cost.maxUSD;
     if (guard) {
-      const charged = await guard.charge(formatAmountUSD(cost.maxUSD))(requestForPayment);
+      // Charge the worst-case price across all candidates the provider may
+      // fall back to. Lets upstream's quota-aware fallback do its job; the
+      // agent's wallet sees a single deterministic upper-bound charge that
+      // matches the credential they signed.
+      chargedUSD = maxAllowedCost(this.env, config);
+      const charged = await guard.charge(formatAmountUSD(chargedUSD))(requestForPayment);
       if (isChallenge(charged)) {
         return charged.challenge;
       }
       attachReceipt = (response) => charged.withReceipt(response);
-      // Once the agent has paid for the requested serverType, the broker must
-      // not silently substitute a cheaper one via fallback candidates.
-      config.strictServerType = true;
     }
     const { server, serverType, attempts } = await provider.createServerWithFallback(
       config,
@@ -235,6 +238,13 @@ export class FleetDurableObject implements DurableObject {
     record.maxEstimatedUSD = finalCost.maxUSD;
     if (config.provider === "aws") {
       record.region = config.awsRegion;
+    }
+    const payer = requestPayer(request).toLowerCase();
+    if (payer) {
+      record.payer = payer;
+    }
+    if (guard) {
+      record.totalChargedUSD = chargedUSD;
     }
     await this.putLease(record);
     await this.scheduleAlarm();
@@ -348,9 +358,10 @@ export class FleetDurableObject implements DurableObject {
       return json({ error: "not_found" }, { status: 404 });
     }
     const now = new Date();
+    const baseChargedUSD = lease.totalChargedUSD ?? lease.maxEstimatedUSD ?? 0;
     lease.ttlSeconds += ttlSecondsAdded;
     lease.maxEstimatedUSD = (lease.maxEstimatedUSD ?? 0) + extendUSD;
-    lease.totalChargedUSD = (lease.totalChargedUSD ?? lease.maxEstimatedUSD ?? 0) + extendUSD;
+    lease.totalChargedUSD = baseChargedUSD + extendUSD;
     lease.updatedAt = now.toISOString();
     lease.lastTouchedAt = now.toISOString();
     lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
@@ -844,7 +855,12 @@ export class FleetDurableObject implements DurableObject {
     if (admin) {
       return true;
     }
-    if (lease.owner !== requestOwner(request) || lease.org !== requestOrg(request, this.env)) {
+    if (lease.org !== requestOrg(request, this.env)) {
+      return false;
+    }
+    const ownerMatch = lease.owner === requestOwner(request);
+    const payerMatch = Boolean(lease.payer) && lease.payer === requestPayer(request).toLowerCase();
+    if (!ownerMatch && !payerMatch) {
       return false;
     }
     const leaseScope = requestLeaseAuth(request);
@@ -1000,6 +1016,28 @@ function clampLimit(value: string | null, fallback: number): number {
 
 function notFound(): Response {
   return json({ error: "not_found" }, { status: 404 });
+}
+
+function leaseConfigCandidates(config: ReturnType<typeof leaseConfig>): string[] {
+  if (config.provider === "aws") {
+    return awsLaunchCandidates(config);
+  }
+  return prependUnique(config.serverType, serverTypeCandidatesForClass(config.class));
+}
+
+function maxAllowedCost(env: Env, config: ReturnType<typeof leaseConfig>): number {
+  let max = 0;
+  for (const candidate of leaseConfigCandidates(config)) {
+    const cost = leaseCost(env, config.provider, candidate, config.ttlSeconds);
+    if (cost.maxUSD > max) {
+      max = cost.maxUSD;
+    }
+  }
+  return max;
+}
+
+function prependUnique(first: string, rest: string[]): string[] {
+  return [first, ...rest.filter((value) => value !== first)];
 }
 
 function requestSourceCIDRs(request: Request): string[] {

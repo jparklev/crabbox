@@ -2,7 +2,6 @@ import { bearerToken } from "./http";
 import type { Env } from "./types";
 
 const tokenPrefix = "cbxu_";
-const leaseTokenPrefix = "cbxl_";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const accessKeyCache = new Map<string, CryptoKey>();
@@ -15,6 +14,8 @@ export interface AuthContext {
   org: string;
   login?: string;
   leaseID?: string;
+  /** 0x… wallet address that funded the request, if any. Independent of `owner`. */
+  payer?: string;
 }
 
 interface UserTokenPayload {
@@ -24,15 +25,8 @@ interface UserTokenPayload {
   login: string;
   name?: string;
   admin?: boolean;
-  exp: number;
-  iat: number;
-}
-
-interface LeaseTokenPayload {
-  typ: "crabbox-lease";
-  leaseID: string;
-  owner: string;
-  org: string;
+  /** Optional: scopes the bearer to a single lease ID (used for MPP-only sessions). */
+  leaseID?: string;
   exp: number;
   iat: number;
 }
@@ -74,25 +68,18 @@ export async function authenticateRequest(
   }
   const userPayload = await verifyUserToken(token, env).catch(() => undefined);
   if (userPayload) {
-    return {
+    const ctx: AuthContext = {
       authorized: true,
       admin: userPayload.admin === true,
-      auth: "github",
+      auth: userPayload.leaseID ? "lease" : "github",
       owner: userPayload.owner,
       org: userPayload.org,
       login: userPayload.login,
     };
-  }
-  const leasePayload = await verifyLeaseToken(token, env).catch(() => undefined);
-  if (leasePayload) {
-    return {
-      authorized: true,
-      admin: false,
-      auth: "lease",
-      owner: leasePayload.owner,
-      org: leasePayload.org,
-      leaseID: leasePayload.leaseID,
-    };
+    if (userPayload.leaseID) {
+      ctx.leaseID = userPayload.leaseID;
+    }
+    return ctx;
   }
   return undefined;
 }
@@ -115,11 +102,20 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   } else {
     headers.delete("x-crabbox-lease-id");
   }
+  if (auth.payer) {
+    headers.set("x-crabbox-payer", auth.payer);
+  } else {
+    headers.delete("x-crabbox-payer");
+  }
   return new Request(request, { headers });
 }
 
 export function requestLeaseAuth(request: Request): string {
   return request.headers.get("x-crabbox-lease-id") ?? "";
+}
+
+export function requestPayer(request: Request): string {
+  return request.headers.get("x-crabbox-payer") ?? "";
 }
 
 export function isAdminRequest(request: Request): boolean {
@@ -153,54 +149,29 @@ export async function issueUserToken(
   return `${tokenPrefix}${encodedPayload}.${sig}`;
 }
 
+/**
+ * Issues a `cbxu_…` user token scoped to a single lease. Same shape as a
+ * normal user token, but with a `leaseID` claim and a tight TTL. Verification
+ * routes back through `verifyUserToken`; downstream visibility checks see
+ * `auth: "lease"` and `auth.leaseID` set so they can scope reads/writes.
+ */
 export async function issueLeaseToken(
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
   input: { leaseID: string; owner: string; org: string; ttlSeconds: number },
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  const payload: LeaseTokenPayload = {
-    typ: "crabbox-lease",
-    leaseID: input.leaseID,
+  const payload: UserTokenPayload = {
+    typ: "crabbox-user",
     owner: input.owner,
     org: input.org,
+    login: input.owner,
+    leaseID: input.leaseID,
     iat: now,
     exp: now + Math.max(60, Math.trunc(input.ttlSeconds)),
   };
   const encodedPayload = base64URL(encoder.encode(JSON.stringify(payload)));
   const sig = await sign(encodedPayload, sessionSecret(env));
-  return `${leaseTokenPrefix}${encodedPayload}.${sig}`;
-}
-
-async function verifyLeaseToken(
-  token: string,
-  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
-): Promise<LeaseTokenPayload | undefined> {
-  if (!token.startsWith(leaseTokenPrefix)) {
-    return undefined;
-  }
-  const raw = token.slice(leaseTokenPrefix.length);
-  const [encodedPayload, signature] = raw.split(".", 2);
-  if (!encodedPayload || !signature) {
-    return undefined;
-  }
-  const expected = await sign(encodedPayload, sessionSecret(env));
-  if (!constantTimeEqual(signature, expected)) {
-    return undefined;
-  }
-  const payload = JSON.parse(
-    new TextDecoder().decode(base64URLDecode(encodedPayload)),
-  ) as Partial<LeaseTokenPayload>;
-  if (
-    payload.typ !== "crabbox-lease" ||
-    typeof payload.leaseID !== "string" ||
-    typeof payload.owner !== "string" ||
-    typeof payload.org !== "string" ||
-    typeof payload.exp !== "number" ||
-    payload.exp <= Math.floor(Date.now() / 1000)
-  ) {
-    return undefined;
-  }
-  return payload as LeaseTokenPayload;
+  return `${tokenPrefix}${encodedPayload}.${sig}`;
 }
 
 async function verifyUserToken(
@@ -230,6 +201,9 @@ async function verifyUserToken(
     typeof payload.exp !== "number" ||
     payload.exp <= Math.floor(Date.now() / 1000)
   ) {
+    return undefined;
+  }
+  if (payload.leaseID !== undefined && !/^cbx_[a-f0-9]{12}$/.test(payload.leaseID)) {
     return undefined;
   }
   return payload as UserTokenPayload;

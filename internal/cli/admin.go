@@ -143,20 +143,25 @@ func configuredCoordinator() (*CoordinatorClient, error) {
 }
 
 func configuredAdminCoordinator() (*CoordinatorClient, error) {
+	coord, _, err := configuredAdminCoordinatorWithConfig()
+	return coord, err
+}
+
+func configuredAdminCoordinatorWithConfig() (*CoordinatorClient, Config, error) {
 	cfg, err := loadConfig()
 	if err != nil {
-		return nil, err
+		return nil, Config{}, err
 	}
 	if cfg.CoordAdminToken == "" {
-		return nil, exit(2, "admin command requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN")
+		return nil, Config{}, exit(2, "admin command requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN")
 	}
 	cfg.CoordToken = cfg.CoordAdminToken
 	coord, ok, err := newCoordinatorClient(cfg)
 	if err != nil {
-		return nil, err
+		return nil, Config{}, err
 	}
 	if !ok {
-		return nil, exit(2, "admin command requires a configured coordinator")
+		return nil, Config{}, exit(2, "admin command requires a configured coordinator")
 	}
-	return coord, nil
+	return coord, cfg, nil
 }

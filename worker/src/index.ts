@@ -4,6 +4,8 @@ import { json } from "./http";
 import { paymentConfigured } from "./payments";
 import type { Env } from "./types";
 
+const PAYER_HEADER = "x-crabbox-payer";
+
 export { FleetDurableObject };
 
 export default {
@@ -19,14 +21,34 @@ export default {
     const auth = await authenticateRequest(request, env);
     const fleetID = env.FLEET.idFromName("default");
     if (auth?.authorized) {
-      return env.FLEET.get(fleetID).fetch(requestWithAuthContext(request, auth));
+      const upgraded = upgradeAuthWithPayer(request, auth);
+      return env.FLEET.get(fleetID).fetch(requestWithAuthContext(request, upgraded));
     }
     if (mppEligible(request, url, env)) {
-      return env.FLEET.get(fleetID).fetch(requestWithAuthContext(request, mppAuth(request, env)));
+      const ctx = mppAuth(request, env);
+      const forwarded = withPayerHeader(requestWithAuthContext(request, ctx), ctx);
+      return env.FLEET.get(fleetID).fetch(forwarded);
     }
     return json({ error: "unauthorized" }, { status: 401 });
   },
 };
+
+function upgradeAuthWithPayer(request: Request, auth: AuthContext): AuthContext {
+  const payer = extractCredentialPayer(request);
+  if (!payer || auth.payer === payer) {
+    return auth;
+  }
+  return { ...auth, payer };
+}
+
+function withPayerHeader(request: Request, ctx: AuthContext): Request {
+  if (!ctx.payer) {
+    return request;
+  }
+  const headers = new Headers(request.headers);
+  headers.set(PAYER_HEADER, ctx.payer);
+  return new Request(request, { headers });
+}
 
 function mppEligible(request: Request, url: URL, env: Env): boolean {
   if (request.method !== "POST") {
@@ -39,17 +61,26 @@ function mppEligible(request: Request, url: URL, env: Env): boolean {
 }
 
 function mppAuth(request: Request, env: Env): AuthContext {
-  const payer = extractCredentialPayer(request);
+  const payer = extractCredentialPayer(request)?.toLowerCase();
+  // For MPP-only flows the agent has no signed user identity. We accept the
+  // payer wallet itself as the canonical owner, prefixed with `mpp:` so it
+  // can never collide with a real email or login. The wallet is also exposed
+  // via `payer` so cost-limits/audit can index on the funding source even if
+  // the owner later upgrades to a GitHub identity.
   const owner = payer
-    ? `mpp:${payer.toLowerCase()}`
+    ? `mpp:${payer}`
     : `mpp:${env.CRABBOX_MPP_RECIPIENT?.toLowerCase() ?? "anonymous"}`;
-  return {
+  const ctx: AuthContext = {
     authorized: true,
     admin: false,
     auth: "mpp",
     owner,
     org: env.CRABBOX_DEFAULT_ORG ?? "mpp",
   };
+  if (payer) {
+    ctx.payer = payer;
+  }
+  return ctx;
 }
 
 export function extractCredentialPayer(request: Request): string | undefined {
