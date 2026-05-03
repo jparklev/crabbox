@@ -880,11 +880,9 @@ export class FleetDurableObject implements DurableObject {
     }
     const nowMs = now.getTime();
     const coveredUntil = paymentCoveredUntil(lease, now).getTime() + meteredLeaseGraceMs;
-    const lastLiquidity = Date.parse(
-      lease.lastLiquidityCheckAt ?? lease.billingStartedAt ?? lease.createdAt,
-    );
-    const nextLiquidity =
-      (Number.isFinite(lastLiquidity) ? lastLiquidity : nowMs) + liquidityCheckIntervalMs;
+    const lastLiquidity =
+      Date.parse(lease.lastLiquidityCheckAt ?? lease.billingStartedAt ?? lease.createdAt) || nowMs;
+    const nextLiquidity = lastLiquidity + liquidityCheckIntervalMs;
     return Math.min(coveredUntil, nextLiquidity);
   }
 
