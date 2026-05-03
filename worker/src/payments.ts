@@ -57,32 +57,14 @@ export function paymentGuardFromEnv(
   if (!recipient) {
     return undefined;
   }
-  if (!isAddress(recipient)) {
-    throw new MppxConfigError("CRABBOX_MPP_RECIPIENT must be a 0x… 20-byte address");
-  }
   const currency = env.CRABBOX_MPP_CURRENCY?.trim();
-  if (!currency) {
-    throw new MppxConfigError("CRABBOX_MPP_CURRENCY is required when MPP is enabled");
-  }
-  if (!isAddress(currency)) {
-    throw new MppxConfigError("CRABBOX_MPP_CURRENCY must be a 0x… 20-byte address");
-  }
-  if (!env.CRABBOX_MPP_SECRET_KEY?.trim()) {
-    throw new MppxConfigError("CRABBOX_MPP_SECRET_KEY is required when MPP is enabled");
-  }
+  const secretKey = env.CRABBOX_MPP_SECRET_KEY?.trim();
   const settlementKey = env.CRABBOX_MPP_SETTLEMENT_PRIVATE_KEY?.trim();
-  if (!settlementKey) {
-    throw new MppxConfigError(
-      "CRABBOX_MPP_SETTLEMENT_PRIVATE_KEY is required when MPP session metering is enabled",
-    );
+  if (!currency || !secretKey || !settlementKey || !env.CRABBOX_SESSION_SECRET?.trim()) {
+    throw new MppxConfigError("missing required MPP configuration");
   }
-  if (!/^0x[0-9a-fA-F]{64}$/.test(settlementKey)) {
-    throw new MppxConfigError("CRABBOX_MPP_SETTLEMENT_PRIVATE_KEY must be a 0x… 32-byte key");
-  }
-  if (!env.CRABBOX_SESSION_SECRET?.trim()) {
-    throw new MppxConfigError(
-      "CRABBOX_SESSION_SECRET is required when MPP is enabled (used to sign lease bearers)",
-    );
+  if (!isAddress(recipient) || !isAddress(currency) || !/^0x[0-9a-fA-F]{64}$/.test(settlementKey)) {
+    throw new MppxConfigError("invalid MPP configuration");
   }
   const decimals = parseDecimals(env.CRABBOX_MPP_DECIMALS) ?? 6;
   const settlementAccount = privateKeyToAccount(settlementKey as Hex);
@@ -100,7 +82,6 @@ export function paymentGuardFromEnv(
     recipient,
     ...(store ? { store } : {}),
   };
-  const secretKey = env.CRABBOX_MPP_SECRET_KEY;
   const realm = env.CRABBOX_MPP_REALM?.trim();
   const mppx = realm
     ? Mppx.create({
