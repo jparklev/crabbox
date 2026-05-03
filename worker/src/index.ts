@@ -5,6 +5,7 @@ import { credentialPayer, parsePaymentCredential, paymentConfigured } from "./pa
 import type { Env } from "./types";
 
 const PAYER_HEADER = "x-crabbox-payer";
+const mppLeaseRoute = /^\/v1\/leases(?:$|\/[^/]+\/(?:heartbeat|release|resume)$)/;
 
 export { FleetDurableObject };
 
@@ -51,18 +52,7 @@ function withPayerHeader(request: Request, ctx: AuthContext): Request {
 }
 
 function mppEligible(request: Request, url: URL, env: Env): boolean {
-  if (request.method !== "POST") {
-    return false;
-  }
-  if (
-    url.pathname === "/v1/leases" ||
-    /^\/v1\/leases\/[^/]+\/heartbeat$/.test(url.pathname) ||
-    /^\/v1\/leases\/[^/]+\/release$/.test(url.pathname) ||
-    /^\/v1\/leases\/[^/]+\/resume$/.test(url.pathname)
-  ) {
-    return paymentConfigured(env);
-  }
-  return false;
+  return request.method === "POST" && mppLeaseRoute.test(url.pathname) && paymentConfigured(env);
 }
 
 function mppAuth(request: Request, env: Env): AuthContext {
