@@ -161,7 +161,10 @@ export function formatAmountUSD(amount: number): string {
 }
 
 export function parsePaymentCredential(request: Request): PaymentCredential | undefined {
-  const auth = paymentAuthorization(request);
+  const auth = [
+    request.headers.get("authorization"),
+    request.headers.get("x-crabbox-payment"),
+  ].find((header) => header?.startsWith("Payment "));
   if (!auth) {
     return undefined;
   }
@@ -175,15 +178,6 @@ export function parsePaymentCredential(request: Request): PaymentCredential | un
   } catch {
     return undefined;
   }
-}
-
-export function paymentAuthorization(request: Request): string | undefined {
-  const auth = request.headers.get("authorization");
-  if (auth?.startsWith("Payment ")) {
-    return auth;
-  }
-  const payment = request.headers.get("x-crabbox-payment");
-  return payment?.startsWith("Payment ") ? payment : undefined;
 }
 
 export function credentialPayer(credential: PaymentCredential | undefined): string | undefined {
