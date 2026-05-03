@@ -1647,7 +1647,6 @@ function jsonResponse(body: unknown, status = 200): Response {
 function challengeSessionGuard(): PaymentGuard {
   return {
     session: (_amountUSD, options) => async () => ({
-      status: 402,
       challenge: new Response(null, {
         status: 402,
         headers: {

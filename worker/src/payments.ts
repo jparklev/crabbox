@@ -29,7 +29,7 @@ export type SessionAcceptance = {
 };
 
 export type SessionResult =
-  | { status: 402; challenge: Response }
+  | { challenge: Response }
   | { accepted?: SessionAcceptance; withReceipt: (response: Response) => Response };
 
 export interface PaymentGuard {
@@ -44,9 +44,7 @@ export interface SessionOptions {
   minVoucherDeltaUSD?: number;
 }
 
-export function isSessionChallenge(
-  result: SessionResult,
-): result is { status: 402; challenge: Response } {
+export function isSessionChallenge(result: SessionResult): result is { challenge: Response } {
   return "challenge" in result;
 }
 
@@ -127,7 +125,7 @@ export function paymentGuardFromEnv(
         unitType: "usd",
       })(request);
       if (response.status === 402) {
-        return { status: 402, challenge: withSessionLimit(response.challenge, options) };
+        return { challenge: withSessionLimit(response.challenge, options) };
       }
       const accepted = sessionAcceptanceFromRequest(request, decimals);
       const result: SessionResult = { withReceipt: (out: Response) => response.withReceipt(out) };
