@@ -151,10 +151,7 @@ export function paymentConfigured(env: Env): boolean {
 }
 
 export function formatAmountUSD(amount: number): string {
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return "0.000001";
-  }
-  return amount.toFixed(6);
+  return Number.isFinite(amount) && amount > 0 ? amount.toFixed(6) : "0.000001";
 }
 
 export function parsePaymentCredential(request: Request): PaymentCredential | undefined {
