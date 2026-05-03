@@ -122,19 +122,12 @@ export interface LeaseRecord {
   releasedAt?: string;
   endedAt?: string;
   extensions?: LeaseExtension[];
-  /** 0x… wallet that funded this lease, when paid via MPP. */
   payer?: string;
-  /** Tempo session/channel id that meters this lease. */
   sessionID?: string;
-  /** Authorized voucher signer for the active Tempo session. */
   sessionKey?: string;
-  /** Agent-authorized maximum session allowance. */
   spendingLimitUSD?: number;
-  /** Exact resolved machine burn rate. */
   burnRateUSDPerMinute?: number;
-  /** Highest cumulative voucher currently held by the broker. */
   highestVoucherHeldUSD?: number;
-  /** Highest cumulative voucher in token base units. */
   highestVoucherHeldUnits?: string;
   billingStartedAt?: string;
   paymentCoveredUntil?: string;
