@@ -6,16 +6,13 @@ import { tempo as tempoChain } from "viem/chains";
 
 import type { Env } from "./types";
 
-export type SessionCredentialPayload = {
-  action?: string;
-  authorizedSigner?: string;
-  channelId?: string;
-  cumulativeAmount?: string;
-};
-
 export type PaymentCredential = {
   source?: string;
-  payload?: SessionCredentialPayload;
+  payload?: {
+    authorizedSigner?: string;
+    channelId?: string;
+    cumulativeAmount?: string;
+  };
 };
 
 export type SessionAcceptance = {
