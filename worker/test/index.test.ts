@@ -40,6 +40,8 @@ function fakeEnv(overrides: Partial<Env> = {}): {
     } as unknown as DurableObjectNamespace,
     CRABBOX_DEFAULT_ORG: "test-org",
     CRABBOX_SESSION_SECRET: "test-session-secret",
+    CRABBOX_MPP_SETTLEMENT_PRIVATE_KEY:
+      "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     ...overrides,
   } as Env;
   return { env, lastRequest: () => captured };
@@ -127,19 +129,16 @@ describe("worker fetch routing", () => {
       }),
       env,
     );
-    // Bearer wins for primary auth; payer is only extracted from Authorization
-    // (single-Authorization-header limit is documented), so this case stays
-    // bearer-without-payer for now.
     expect(response.status).toBe(200);
     const req = lastRequest();
     expect(req?.headers.get("x-crabbox-auth")).toBe("bearer");
-    expect(req?.headers.get("x-crabbox-payer")).toBeNull();
+    expect(req?.headers.get("x-crabbox-payer")).toBe("0xAA000000000000000000000000000000000000Bb");
   });
 
-  it("rejects extend on an unconfigured-MPP coordinator with 401", async () => {
+  it("rejects heartbeat on an unconfigured-MPP coordinator with 401", async () => {
     const { env } = fakeEnv();
     const response = await worker.fetch(
-      new Request("https://example.test/v1/leases/cbx_aaaaaaaaaaaa/extend", {
+      new Request("https://example.test/v1/leases/cbx_aaaaaaaaaaaa/heartbeat", {
         method: "POST",
       }),
       env,

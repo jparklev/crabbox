@@ -1,10 +1,15 @@
 import { isAdminRequest, issueLeaseToken, requestLeaseAuth, requestPayer } from "./auth";
-import { awsLaunchCandidates, EC2SpotClient } from "./aws";
-import { leaseConfig, serverTypeCandidatesForClass, validCIDRs } from "./config";
+import { EC2SpotClient } from "./aws";
+import { leaseConfig, validCIDRs } from "./config";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute } from "./oauth";
-import { formatAmountUSD, isChallenge, paymentGuardFromEnv, type PaymentGuard } from "./payments";
+import {
+  isSessionChallenge,
+  paymentGuardFromEnv,
+  type PaymentGuard,
+  type SessionAcceptance,
+} from "./payments";
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
 import type {
   Env,
@@ -155,6 +160,8 @@ export class FleetDurableObject implements DurableObject {
       config.ttlSeconds,
       providerHourlyUSD,
     );
+    const spendingLimitUSD = requestedSpendingLimitUSD(input, cost.maxUSD);
+    const burnEstimateUSDPerMinute = cost.hourlyUSD / 60;
     const now = new Date();
     const record: LeaseRecord = {
       id: leaseID,
@@ -179,7 +186,7 @@ export class FleetDurableObject implements DurableObject {
       ttlSeconds: config.ttlSeconds,
       idleTimeoutSeconds: config.idleTimeoutSeconds,
       estimatedHourlyUSD: cost.hourlyUSD,
-      maxEstimatedUSD: cost.maxUSD,
+      maxEstimatedUSD: spendingLimitUSD,
       state: "active",
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
@@ -190,6 +197,11 @@ export class FleetDurableObject implements DurableObject {
         config.ttlSeconds,
         config.idleTimeoutSeconds,
       ).toISOString(),
+      spendingLimitUSD,
+      burnRateUSDPerMinute: burnEstimateUSDPerMinute,
+      billingStartedAt: now.toISOString(),
+      sshPublicKey: config.sshPublicKey,
+      resumeRequest: input,
     };
     const limitError = enforceCostLimits(leases, record, costLimits(this.env), now);
     if (limitError) {
@@ -197,25 +209,30 @@ export class FleetDurableObject implements DurableObject {
     }
     const guard = this.paymentGuard();
     let attachReceipt: ((response: Response) => Response) | undefined;
-    let chargedUSD = cost.maxUSD;
+    let acceptedSession: SessionAcceptance | undefined;
     if (guard) {
-      // Charge the worst-case price across all candidates the provider may
-      // fall back to. Lets upstream's quota-aware fallback do its job; the
-      // agent's wallet sees a single deterministic upper-bound charge that
-      // matches the credential they signed.
-      chargedUSD = maxAllowedCost(this.env, config);
-      const charged = await guard.charge(formatAmountUSD(chargedUSD))(requestForPayment);
-      if (isChallenge(charged)) {
-        return charged.challenge;
+      const depositUSD = twoMinuteBufferUSD(burnEstimateUSDPerMinute);
+      const session = await guard.session(depositUSD, {
+        description: "Crabbox lease session",
+        scope: `lease:${leaseID}:create`,
+        spendingLimitUSD,
+      })(requestForPayment);
+      if (isSessionChallenge(session)) {
+        return session.challenge;
       }
-      attachReceipt = (response) => charged.withReceipt(response);
+      acceptedSession = session.accepted;
+      attachReceipt = (response) => session.withReceipt(response);
     }
-    const { server, serverType, attempts } = await provider.createServerWithFallback(
-      config,
-      leaseID,
-      slug,
-      owner,
-    );
+    let provisioned: Awaited<ReturnType<CloudProvider["createServerWithFallback"]>>;
+    try {
+      provisioned = await provider.createServerWithFallback(config, leaseID, slug, owner);
+    } catch (error) {
+      if (guard && acceptedSession) {
+        await guard.settleZero(acceptedSession).catch(() => undefined);
+      }
+      throw error;
+    }
+    const { server, serverType, attempts } = provisioned;
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (attempts && attempts.length > 0) {
@@ -235,7 +252,8 @@ export class FleetDurableObject implements DurableObject {
       finalProviderHourlyUSD,
     );
     record.estimatedHourlyUSD = finalCost.hourlyUSD;
-    record.maxEstimatedUSD = finalCost.maxUSD;
+    record.maxEstimatedUSD = spendingLimitUSD;
+    record.burnRateUSDPerMinute = finalCost.hourlyUSD / 60;
     if (config.provider === "aws") {
       record.region = config.awsRegion;
     }
@@ -243,8 +261,11 @@ export class FleetDurableObject implements DurableObject {
     if (payer) {
       record.payer = payer;
     }
-    if (guard) {
-      record.totalChargedUSD = chargedUSD;
+    if (guard && acceptedSession) {
+      applyAcceptedSession(record, acceptedSession);
+      record.totalChargedUSD = acceptedSession.cumulativeAmountUSD;
+      record.paymentCoveredUntil = paymentCoveredUntil(record, now).toISOString();
+      record.expiresAt = record.paymentCoveredUntil;
     }
     await this.putLease(record);
     await this.scheduleAlarm();
@@ -286,6 +307,10 @@ export class FleetDurableObject implements DurableObject {
       if (!lease) {
         return notFound();
       }
+      const metered = await this.acceptMeteredVoucher(request, lease, "heartbeat");
+      if (metered) {
+        return metered;
+      }
       const body = await optionalJson<{ idleTimeoutSeconds?: number }>(request);
       const now = new Date();
       const requestedIdleTimeoutSeconds = body.idleTimeoutSeconds;
@@ -298,85 +323,20 @@ export class FleetDurableObject implements DurableObject {
       }
       lease.updatedAt = now.toISOString();
       lease.lastTouchedAt = now.toISOString();
-      lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
+      lease.expiresAt = lease.sessionID
+        ? paymentCoveredUntil(lease, now).toISOString()
+        : recomputeLeaseExpiresAt(lease, now).toISOString();
       await this.putLease(lease);
       await this.scheduleAlarm();
       return json({ lease });
     }
-    if (method === "POST" && action === "extend") {
-      return this.extendLease(request, leaseID);
-    }
     if (method === "POST" && action === "release") {
       return this.releaseLease(request, leaseID, false);
     }
+    if (method === "POST" && action === "resume") {
+      return this.resumeLease(request, leaseID);
+    }
     return json({ error: "not_found" }, { status: 404 });
-  }
-
-  private async extendLease(request: Request, leaseID: string): Promise<Response> {
-    const requestForPayment = request.clone();
-    const body = await optionalJson<{ ttlSecondsAdded?: number }>(request);
-    const lease = await this.getLease(leaseID);
-    if (!lease) {
-      return notFound();
-    }
-    if (lease.state !== "active") {
-      return json({ error: "lease_not_active" }, { status: 409 });
-    }
-    // If a credential is attached the payer is known; reject mismatched
-    // wallets before charging anyone.
-    const hasPaymentCredential = request.headers
-      .get("authorization")
-      ?.toLowerCase()
-      .startsWith("payment ");
-    if (hasPaymentCredential && !this.leaseVisibleToRequest(lease, request, false)) {
-      return json({ error: "owner_mismatch" }, { status: 403 });
-    }
-    const requested = Number.isFinite(body.ttlSecondsAdded) ? Number(body.ttlSecondsAdded) : 300;
-    const ttlSecondsAdded = Math.max(60, Math.min(Math.trunc(requested), 3600));
-    const hourlyUSD = lease.estimatedHourlyUSD ?? 0;
-    const extendUSD = (hourlyUSD * ttlSecondsAdded) / 3600;
-    const limitError = enforceCostLimits(
-      await this.leaseRecords(),
-      { ...lease, maxEstimatedUSD: (lease.maxEstimatedUSD ?? 0) + extendUSD },
-      costLimits(this.env),
-      new Date(),
-    );
-    if (limitError) {
-      return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
-    }
-    const guard = this.paymentGuard();
-    let attachReceipt: ((response: Response) => Response) | undefined;
-    if (guard) {
-      const charged = await guard.charge(formatAmountUSD(extendUSD))(requestForPayment);
-      if (isChallenge(charged)) {
-        return charged.challenge;
-      }
-      attachReceipt = (response) => charged.withReceipt(response);
-    } else if (!this.leaseVisibleToRequest(lease, request, false)) {
-      // Non-MPP path: visibility was deferred since we let unauth lookups peek
-      // for the rate. Now that no payment will be charged, owner must match.
-      return json({ error: "not_found" }, { status: 404 });
-    }
-    const now = new Date();
-    const baseChargedUSD = lease.totalChargedUSD ?? lease.maxEstimatedUSD ?? 0;
-    lease.ttlSeconds += ttlSecondsAdded;
-    lease.maxEstimatedUSD = (lease.maxEstimatedUSD ?? 0) + extendUSD;
-    lease.totalChargedUSD = baseChargedUSD + extendUSD;
-    lease.updatedAt = now.toISOString();
-    lease.lastTouchedAt = now.toISOString();
-    lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
-    if (!lease.extensions) {
-      lease.extensions = [];
-    }
-    lease.extensions.push({
-      at: now.toISOString(),
-      ttlSecondsAdded,
-      amountUSD: extendUSD,
-    });
-    await this.putLease(lease);
-    await this.scheduleAlarm();
-    const response = json({ lease });
-    return attachReceipt ? attachReceipt(response) : response;
   }
 
   private async releaseLease(request: Request, leaseID: string, admin: boolean): Promise<Response> {
@@ -384,10 +344,17 @@ export class FleetDurableObject implements DurableObject {
     if (!lease) {
       return notFound();
     }
+    const metered = await this.acceptMeteredVoucher(request, lease, "release");
+    if (metered) {
+      return metered;
+    }
     const body = await optionalJson<{ delete?: boolean }>(request);
     const shouldDelete = body.delete ?? !lease.keep;
     if (shouldDelete && lease.state === "active") {
       await this.deleteLeaseServer(lease);
+    }
+    if (lease.sessionID) {
+      await this.settleLease(lease);
     }
     const now = new Date().toISOString();
     lease.state = "released";
@@ -396,6 +363,134 @@ export class FleetDurableObject implements DurableObject {
     lease.endedAt = now;
     await this.putLease(lease);
     return json({ lease });
+  }
+
+  private async resumeLease(request: Request, leaseID: string): Promise<Response> {
+    const requestForPayment = request.clone();
+    const lease = await this.resolveLease(leaseID, request, false);
+    if (!lease) {
+      return notFound();
+    }
+    if (lease.state !== "hibernated") {
+      return json({ error: "lease_not_hibernated" }, { status: 409 });
+    }
+    if (!lease.snapshotID) {
+      return json({ error: "snapshot_missing" }, { status: 409 });
+    }
+    if (!lease.sshPublicKey) {
+      return json({ error: "ssh_public_key_missing" }, { status: 409 });
+    }
+    const input = await optionalJson<LeaseRequest>(request);
+    const resumeRequest: LeaseRequest = {
+      ...lease.resumeRequest,
+      ...input,
+      leaseID: lease.id,
+      provider: lease.provider,
+      sshPublicKey: lease.sshPublicKey,
+    };
+    if (lease.provider === "aws") {
+      resumeRequest.awsAMI = lease.snapshotID;
+    } else {
+      resumeRequest.image = lease.snapshotID;
+    }
+    const config = leaseConfig(resumeRequest);
+    const guard = this.paymentGuard();
+    let attachReceipt: ((response: Response) => Response) | undefined;
+    if (guard) {
+      const spendingLimitUSD = requestedSpendingLimitUSD(
+        resumeRequest,
+        lease.spendingLimitUSD ?? lease.maxEstimatedUSD ?? 1,
+      );
+      const session = await guard.session(twoMinuteBufferUSD(lease.burnRateUSDPerMinute ?? 0), {
+        description: "Crabbox resume session",
+        scope: `lease:${lease.id}:resume`,
+        spendingLimitUSD,
+      })(requestForPayment);
+      if (isSessionChallenge(session)) {
+        return session.challenge;
+      }
+      if (session.accepted) {
+        applyAcceptedSession(lease, session.accepted);
+        lease.spendingLimitUSD = spendingLimitUSD;
+        lease.totalChargedUSD = session.accepted.cumulativeAmountUSD;
+      }
+      attachReceipt = (response) => session.withReceipt(response);
+    }
+    const provider = this.provider(config.provider, config.awsRegion);
+    const { server, serverType, attempts } = await provider.createServerWithFallback(
+      config,
+      lease.id,
+      lease.slug ?? leaseSlugFromID(lease.id),
+      lease.owner,
+    );
+    const now = new Date();
+    lease.cloudID = server.cloudID;
+    lease.serverID = server.id;
+    lease.serverName = server.name;
+    lease.host = server.host;
+    lease.serverType = serverType;
+    if (attempts) {
+      lease.provisioningAttempts = attempts;
+    }
+    lease.state = "active";
+    lease.updatedAt = now.toISOString();
+    lease.lastTouchedAt = now.toISOString();
+    lease.billingStartedAt = now.toISOString();
+    lease.resumedFromSnapshotID = lease.snapshotID;
+    delete lease.snapshotID;
+    delete lease.hibernatedAt;
+    lease.burnRateUSDPerMinute = (lease.estimatedHourlyUSD ?? 0) / 60;
+    lease.paymentCoveredUntil = paymentCoveredUntil(lease, now).toISOString();
+    lease.expiresAt = lease.sessionID
+      ? lease.paymentCoveredUntil
+      : recomputeLeaseExpiresAt(lease, now).toISOString();
+    await this.putLease(lease);
+    await this.scheduleAlarm();
+    const response = json({ lease });
+    return attachReceipt ? attachReceipt(response) : response;
+  }
+
+  private async acceptMeteredVoucher(
+    request: Request,
+    lease: LeaseRecord,
+    action: "heartbeat" | "release",
+  ): Promise<Response | undefined> {
+    if (!lease.sessionID) {
+      return undefined;
+    }
+    const guard = this.paymentGuard();
+    if (!guard) {
+      return json(
+        { error: "payment_required", message: "payment guard unavailable" },
+        { status: 402 },
+      );
+    }
+    const now = new Date();
+    const dueUSD = Math.max(0, voucherRequiredUSD(lease, now) - (lease.highestVoucherHeldUSD ?? 0));
+    const minUSD = action === "release" ? 0.000001 : dueUSD || 0.000001;
+    const session = await guard.session(minUSD, {
+      description: `Crabbox lease ${action}`,
+      scope: `lease:${lease.id}:${action}`,
+      spendingLimitUSD: lease.spendingLimitUSD ?? lease.maxEstimatedUSD ?? minUSD,
+    })(request.clone());
+    if (isSessionChallenge(session)) {
+      return session.challenge;
+    }
+    if (session.accepted) {
+      if (session.accepted.channelID.toLowerCase() !== lease.sessionID.toLowerCase()) {
+        return json({ error: "session_mismatch" }, { status: 403 });
+      }
+      if (
+        (lease.highestVoucherHeldUSD ?? 0) > 0 &&
+        session.accepted.cumulativeAmountUSD < (lease.highestVoucherHeldUSD ?? 0)
+      ) {
+        return json({ error: "voucher_not_monotonic" }, { status: 409 });
+      }
+      applyAcceptedSession(lease, session.accepted);
+      lease.totalChargedUSD = session.accepted.cumulativeAmountUSD;
+    }
+    lease.paymentCoveredUntil = paymentCoveredUntil(lease, now).toISOString();
+    return undefined;
   }
 
   private whoami(request: Request): Response {
@@ -754,8 +849,14 @@ export class FleetDurableObject implements DurableObject {
   private async expireLeases(): Promise<void> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
     const now = Date.now();
-    const expired = [...leases.values()].filter(
-      (lease) => lease.state === "active" && Date.parse(lease.expiresAt) <= now,
+    const active = [...leases.values()].filter((lease) => lease.state === "active");
+    const expired = active.filter(
+      (lease) => !lease.sessionID && Date.parse(lease.expiresAt) <= now,
+    );
+    const uncovered = active.filter(
+      (lease) =>
+        Boolean(lease.sessionID) &&
+        voucherRequiredUSD(lease, new Date(now)) > (lease.highestVoucherHeldUSD ?? 0) + 0.000001,
     );
     await Promise.all(
       expired.map(async (lease) => {
@@ -767,19 +868,105 @@ export class FleetDurableObject implements DurableObject {
         await this.putLease(lease);
       }),
     );
+    await Promise.all(uncovered.map((lease) => this.hibernateLease(lease)));
+    await this.liquidityCheckLongRunningLeases(active, new Date(now));
   }
 
   private async scheduleAlarm(): Promise<void> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
-    const activeExpiries = [...leases.values()]
-      .filter((lease) => lease.state === "active")
-      .map((lease) => Date.parse(lease.expiresAt))
+    const active = [...leases.values()].filter((lease) => lease.state === "active");
+    const activeExpiries = active
+      .map((lease) => (lease.sessionID ? Date.now() + 30_000 : Date.parse(lease.expiresAt)))
       .filter((time) => Number.isFinite(time));
     if (activeExpiries.length === 0) {
       await this.state.storage.deleteAlarm();
       return;
     }
     await this.state.storage.setAlarm(Math.min(...activeExpiries));
+  }
+
+  private async hibernateLease(lease: LeaseRecord): Promise<void> {
+    if (lease.state !== "active") {
+      return;
+    }
+    const now = new Date();
+    try {
+      const snapshot = await this.snapshotLease(lease);
+      lease.snapshotID = snapshot.id;
+      lease.snapshotName = snapshot.name;
+      await this.waitForImageAvailable(lease.provider, snapshot.id, lease.region);
+    } finally {
+      await this.deleteLeaseServer(lease).catch(() => undefined);
+      lease.state = "hibernated";
+      lease.updatedAt = now.toISOString();
+      lease.endedAt = now.toISOString();
+      lease.hibernatedAt = now.toISOString();
+      lease.expiresAt = now.toISOString();
+      await this.putLease(lease);
+    }
+  }
+
+  private async snapshotLease(lease: LeaseRecord): Promise<ProviderImage> {
+    const name = `crabbox-hibernate-${lease.id}-${Date.now()}`;
+    if (lease.provider === "aws") {
+      return this.provider("aws", lease.region).createImage(lease.cloudID, name, true);
+    }
+    return this.provider("hetzner").createImage(String(lease.serverID), name, false);
+  }
+
+  private async waitForImageAvailable(
+    providerName: Provider,
+    imageID: string,
+    region?: string,
+  ): Promise<void> {
+    const provider = this.provider(providerName, region);
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- snapshot polling is intentionally sequential.
+      const image = await provider.getImage(imageID).catch(() => undefined);
+      if (!image || image.state === "available") {
+        return;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- this delay is the polling interval.
+      await sleep(2_000);
+    }
+  }
+
+  private async liquidityCheckLongRunningLeases(leases: LeaseRecord[], now: Date): Promise<void> {
+    await Promise.all(
+      leases
+        .filter((lease) => lease.sessionID)
+        .filter((lease) => {
+          const last = Date.parse(lease.lastLiquidityCheckAt ?? lease.billingStartedAt ?? "");
+          return !Number.isFinite(last) || now.getTime() - last >= 10 * 60_000;
+        })
+        .map(async (lease) => {
+          await this.settleLease(lease).catch(() => undefined);
+          lease.lastLiquidityCheckAt = now.toISOString();
+          await this.putLease(lease);
+        }),
+    );
+  }
+
+  private async settleLease(lease: LeaseRecord): Promise<void> {
+    if (!lease.sessionID) {
+      return;
+    }
+    const guard = this.paymentGuard();
+    if (!guard) {
+      lease.settlementStatus = "failed";
+      return;
+    }
+    try {
+      const tx = await guard.settle(lease.sessionID);
+      lease.settlementStatus = tx ? "submitted" : "skipped";
+      if (tx) {
+        lease.settlementTx = tx;
+      }
+      lease.settledAt = new Date().toISOString();
+    } catch {
+      lease.settlementStatus = "failed";
+    }
   }
 
   private async getLease(leaseID: string): Promise<LeaseRecord | undefined> {
@@ -1016,28 +1203,6 @@ function clampLimit(value: string | null, fallback: number): number {
 
 function notFound(): Response {
   return json({ error: "not_found" }, { status: 404 });
-}
-
-function leaseConfigCandidates(config: ReturnType<typeof leaseConfig>): string[] {
-  if (config.provider === "aws") {
-    return awsLaunchCandidates(config);
-  }
-  return prependUnique(config.serverType, serverTypeCandidatesForClass(config.class));
-}
-
-function maxAllowedCost(env: Env, config: ReturnType<typeof leaseConfig>): number {
-  let max = 0;
-  for (const candidate of leaseConfigCandidates(config)) {
-    const cost = leaseCost(env, config.provider, candidate, config.ttlSeconds);
-    if (cost.maxUSD > max) {
-      max = cost.maxUSD;
-    }
-  }
-  return max;
-}
-
-function prependUnique(first: string, rest: string[]): string[] {
-  return [first, ...rest.filter((value) => value !== first)];
 }
 
 function requestSourceCIDRs(request: Request): string[] {
@@ -1351,6 +1516,66 @@ async function optionalJson<T>(request: Request): Promise<T> {
     return {} as T;
   }
   return readJson<T>(request);
+}
+
+function requestedSpendingLimitUSD(input: LeaseRequest, fallbackUSD: number): number {
+  const wireInput = input as Record<string, unknown>;
+  const requested =
+    finiteNumber(input.spendingLimitUSD) ??
+    finiteNumber(input.allowanceUSD) ??
+    finiteNumber(Number(wireInput["spending_limit"])) ??
+    finiteNumber(Number(wireInput["spending_limit_usd"]));
+  if (requested !== undefined && requested > 0) {
+    return Math.min(roundMoney(requested), 10_000);
+  }
+  return Math.max(roundMoney(fallbackUSD), 0.01);
+}
+
+function twoMinuteBufferUSD(burnRateUSDPerMinute: number): number {
+  if (!Number.isFinite(burnRateUSDPerMinute) || burnRateUSDPerMinute <= 0) {
+    return 0.01;
+  }
+  return Math.max(roundMoney(burnRateUSDPerMinute * 2), 0.000001);
+}
+
+function voucherRequiredUSD(lease: LeaseRecord, now: Date): number {
+  const started = Date.parse(lease.billingStartedAt ?? lease.createdAt);
+  const burn = lease.burnRateUSDPerMinute ?? (lease.estimatedHourlyUSD ?? 0) / 60;
+  if (!Number.isFinite(started) || !Number.isFinite(burn) || burn <= 0) {
+    return 0;
+  }
+  const elapsedMinutes = Math.max(0, now.getTime() - started) / 60_000;
+  return roundMoney(elapsedMinutes * burn);
+}
+
+function paymentCoveredUntil(lease: LeaseRecord, fallbackNow: Date): Date {
+  const started = Date.parse(lease.billingStartedAt ?? lease.createdAt);
+  const burn = lease.burnRateUSDPerMinute ?? (lease.estimatedHourlyUSD ?? 0) / 60;
+  const held = lease.highestVoucherHeldUSD ?? 0;
+  if (!Number.isFinite(started) || !Number.isFinite(burn) || burn <= 0 || held <= 0) {
+    return fallbackNow;
+  }
+  return new Date(started + (held / burn) * 60_000);
+}
+
+function applyAcceptedSession(lease: LeaseRecord, accepted: SessionAcceptance): void {
+  lease.sessionID = accepted.channelID;
+  lease.highestVoucherHeldUnits = accepted.cumulativeAmountUnits;
+  lease.highestVoucherHeldUSD = accepted.cumulativeAmountUSD;
+  if (accepted.sessionKey) {
+    lease.sessionKey = accepted.sessionKey;
+  }
+  if (accepted.payer) {
+    lease.payer = accepted.payer;
+  }
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 interface CloudProvider {

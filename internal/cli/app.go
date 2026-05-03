@@ -190,6 +190,7 @@ Environment:
   CRABBOX_CONFIG               Optional config path
   CRABBOX_IDLE_TIMEOUT         Default idle expiry, e.g. 30m
   CRABBOX_TTL                  Maximum lease lifetime, e.g. 90m
+  CRABBOX_ALLOWANCE_USD        Coordinator Tempo session allowance, e.g. 25
   CRABBOX_AWS_REGION           Default eu-west-1
   CRABBOX_AWS_SSH_CIDRS        Comma-separated AWS SSH source CIDRs
   CRABBOX_SSH_FALLBACK_PORTS   Comma-separated SSH fallback ports, or none

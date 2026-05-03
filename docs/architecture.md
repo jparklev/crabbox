@@ -34,17 +34,17 @@ leased machine
 
 1. CLI loads config and authenticates with a signed GitHub login token or shared operator token.
 2. CLI creates a per-lease SSH key.
-3. CLI sends `POST /v1/leases` with lease ID, slug, profile, TTL, idle timeout, desired machine class, and SSH public key.
-4. Coordinator validates identity and policy.
+3. CLI sends `POST /v1/leases` with lease ID, slug, profile, spending allowance, idle timeout, desired machine class, and SSH public key.
+4. Coordinator validates identity and policy. If Tempo metering is enabled, it answers with a `402` session challenge and waits for a valid initial voucher before provisioning.
 5. Durable Object chooses a provider from config and creates a Hetzner server or AWS EC2 Spot instance.
-6. Coordinator returns lease ID, slug, machine address, SSH user, workdir, and expiry.
+6. Coordinator returns lease ID, slug, machine address, SSH user, workdir, expiry, and the resolved `burnRateUSDPerMinute`.
 7. CLI waits for `crabbox-ready`.
 8. CLI seeds remote Git when possible, compares sync fingerprints, and syncs changed files with `rsync --delete`.
 9. CLI runs sync sanity and configured base-ref hydration.
 10. CLI runs the command over SSH and streams stdout/stderr.
-11. CLI heartbeats while the command runs; heartbeats touch `lastTouchedAt` and recompute idle expiry up to the TTL cap.
-12. CLI releases the lease when done.
-13. Durable Object alarm cleans up stale leases and expired machines.
+11. CLI heartbeats while the command runs; on metered leases, heartbeats carry cumulative Tempo vouchers every 15 seconds.
+12. CLI releases the lease when done; release submits the highest voucher for settlement.
+13. Durable Object alarm cleans up stale leases, hibernates underfunded metered machines with a native snapshot, and terminates active compute.
 
 ## Coordinator API
 
@@ -59,6 +59,7 @@ GET  /v1/leases
 GET  /v1/leases/{id-or-slug}
 POST /v1/leases/{id-or-slug}/heartbeat
 POST /v1/leases/{id-or-slug}/release
+POST /v1/leases/{id-or-slug}/resume
 GET  /v1/runs
 POST /v1/runs
 GET  /v1/runs/{run-id}
@@ -79,7 +80,7 @@ Use one fleet Durable Object for MVP. It owns all atomic scheduling decisions.
 Core stored records:
 
 ```sql
-leases(id, slug, provider, cloud_id, region, owner, org, profile, class, server_type, server_id, server_name, provider_key, host, ssh_user, ssh_port, work_root, keep, ttl_seconds, idle_timeout_seconds, estimated_hourly_usd, max_estimated_usd, state, created_at, updated_at, last_touched_at, expires_at, released_at, ended_at)
+leases(id, slug, provider, cloud_id, region, owner, org, profile, class, server_type, server_id, server_name, provider_key, host, ssh_user, ssh_port, work_root, keep, ttl_seconds, idle_timeout_seconds, estimated_hourly_usd, max_estimated_usd, session_id, session_key, spending_limit_usd, burn_rate_usd_per_minute, highest_voucher_held_usd, snapshot_id, state, created_at, updated_at, last_touched_at, expires_at, released_at, ended_at)
 runs(id, lease_id, slug, owner, org, provider, class, server_type, command_json, state, exit_code, sync_ms, command_ms, duration_ms, log_bytes, log_truncated, results_json, started_at, ended_at)
 runlog(run_id, bounded_stdout_stderr_capture)
 ```
@@ -93,6 +94,7 @@ machine: leased -> draining -> idle|deleted
 lease: pending -> active -> released
 lease: pending|active -> expired
 lease: active -> failed
+lease: active -> hibernated -> active
 ```
 
 ## Backends

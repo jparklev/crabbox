@@ -25,6 +25,7 @@ Flags:
 --market spot|on-demand
 --ttl <duration>
 --idle-timeout <duration>
+--allowance-usd <amount>
 --keep
 --actions-runner
 --reclaim
@@ -35,7 +36,7 @@ Flags:
 --blacksmith-ref <ref>
 ```
 
-`--idle-timeout` releases the lease after no touch for that duration, default `30m`. `--ttl` remains the maximum wall-clock lifetime, default `90m`.
+`--allowance-usd` sets the coordinator Tempo session spending limit, default `$5`. `--idle-timeout` releases non-metered leases after no touch for that duration, default `30m`. `--ttl` remains available for direct-provider cleanup labels and non-metered coordinators.
 Warmup records a local claim tying the lease to the current repo; `--reclaim` overwrites an existing local claim for that lease.
 
 For AWS, `--market` overrides `capacity.market` for this lease. Use

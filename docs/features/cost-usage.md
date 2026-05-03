@@ -40,7 +40,7 @@ Identity for usage:
 - `CRABBOX_ORG` sends `X-Crabbox-Org`.
 - raw Cloudflare Access identity headers are ignored; only a verified Access JWT email can become the bearer-token owner.
 
-`estimatedUSD` is elapsed runtime cost. `reservedUSD` is TTL worst-case cost reserved before provisioning. Provider extras such as static IP charges, egress, snapshots, taxes, credits, and discounts are not fully modeled.
+`estimatedUSD` is elapsed runtime cost. `reservedUSD` is the metered allowance for paid coordinator leases or the direct/non-metered TTL worst-case cost. Provider extras such as static IP charges, egress, snapshots, taxes, credits, and discounts are not fully modeled.
 
 Related docs:
 

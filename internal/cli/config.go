@@ -40,6 +40,7 @@ type Config struct {
 	WorkRoot           string
 	TTL                time.Duration
 	IdleTimeout        time.Duration
+	AllowanceUSD       float64
 	Sync               SyncConfig
 	EnvAllow           []string
 	Capacity           CapacityConfig
@@ -158,6 +159,7 @@ func baseConfig() Config {
 		WorkRoot:         "/work/crabbox",
 		TTL:              90 * time.Minute,
 		IdleTimeout:      30 * time.Minute,
+		AllowanceUSD:     5,
 		Sync: SyncConfig{
 			Delete:      true,
 			Checksum:    false,
@@ -210,6 +212,7 @@ type fileConfig struct {
 	Lease            *fileLeaseConfig      `yaml:"lease,omitempty"`
 	TTL              string                `yaml:"ttl,omitempty"`
 	IdleTimeout      string                `yaml:"idleTimeout,omitempty"`
+	AllowanceUSD     float64               `yaml:"allowanceUSD,omitempty"`
 	WorkRoot         string                `yaml:"workRoot,omitempty"`
 }
 
@@ -311,8 +314,9 @@ type fileCacheConfig struct {
 }
 
 type fileLeaseConfig struct {
-	TTL         string `yaml:"ttl,omitempty"`
-	IdleTimeout string `yaml:"idleTimeout,omitempty"`
+	TTL          string  `yaml:"ttl,omitempty"`
+	IdleTimeout  string  `yaml:"idleTimeout,omitempty"`
+	AllowanceUSD float64 `yaml:"allowanceUSD,omitempty"`
 }
 
 func configPaths() []string {
@@ -508,9 +512,15 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 	}
 	applyLeaseDuration(&cfg.TTL, file.TTL)
 	applyLeaseDuration(&cfg.IdleTimeout, file.IdleTimeout)
+	if file.AllowanceUSD > 0 {
+		cfg.AllowanceUSD = file.AllowanceUSD
+	}
 	if file.Lease != nil {
 		applyLeaseDuration(&cfg.TTL, file.Lease.TTL)
 		applyLeaseDuration(&cfg.IdleTimeout, file.Lease.IdleTimeout)
+		if file.Lease.AllowanceUSD > 0 {
+			cfg.AllowanceUSD = file.Lease.AllowanceUSD
+		}
 	}
 	if file.Sync != nil {
 		cfg.Sync.Excludes = appendUniqueStrings(cfg.Sync.Excludes, file.Sync.Exclude...)
@@ -685,6 +695,9 @@ func applyEnv(cfg *Config) {
 	if idleTimeout := os.Getenv("CRABBOX_IDLE_TIMEOUT"); idleTimeout != "" {
 		applyLeaseDuration(&cfg.IdleTimeout, idleTimeout)
 	}
+	if allowance := os.Getenv("CRABBOX_ALLOWANCE_USD"); allowance != "" {
+		cfg.AllowanceUSD = getenvFloat("CRABBOX_ALLOWANCE_USD", cfg.AllowanceUSD)
+	}
 	cfg.Capacity.Market = getenv("CRABBOX_CAPACITY_MARKET", cfg.Capacity.Market)
 	cfg.Capacity.Strategy = getenv("CRABBOX_CAPACITY_STRATEGY", cfg.Capacity.Strategy)
 	cfg.Capacity.Fallback = getenv("CRABBOX_CAPACITY_FALLBACK", cfg.Capacity.Fallback)
@@ -838,6 +851,18 @@ func getenvInt(name string, fallback int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func getenvFloat(name string, fallback float64) float64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil || n <= 0 {
 		return fallback
 	}
 	return n

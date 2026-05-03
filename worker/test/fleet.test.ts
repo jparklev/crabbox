@@ -455,19 +455,8 @@ describe("fleet lease identity and idle", () => {
     expect(observedImage).toBe("382206402");
   });
 
-  it("returns 402 from POST /v1/leases when a payment guard is configured and no payment is attached", async () => {
+  it("returns a session 402 from POST /v1/leases before provisioning", async () => {
     let createdServer = false;
-    const guard: PaymentGuard = {
-      charge: (amount: string) => async () => ({
-        status: 402,
-        challenge: new Response(null, {
-          status: 402,
-          headers: {
-            "www-authenticate": `Payment realm="crabbox", method="tempo", amount="${amount}"`,
-          },
-        }),
-      }),
-    };
     const fleet = testFleet(
       new MemoryStorage(),
       {
@@ -475,7 +464,7 @@ describe("fleet lease identity and idle", () => {
           createdServer = true;
         }),
       },
-      guard,
+      challengeSessionGuard(),
     );
 
     const create = await fleet.fetch(
@@ -496,16 +485,17 @@ describe("fleet lease identity and idle", () => {
     );
     expect(create.status).toBe(402);
     expect(create.headers.get("www-authenticate")).toContain('method="tempo"');
+    expect(create.headers.get("www-authenticate")).toContain('intent="session"');
+    expect(create.headers.get("www-authenticate")).toContain('limit="');
     expect(createdServer).toBe(false);
   });
 
   it("issues a lease bearer for MPP-authenticated lease creation", async () => {
-    const guard: PaymentGuard = {
-      charge: () => async () => ({
-        withReceipt: (response: Response) => response,
-      }),
-    };
-    const fleet = testFleet(new MemoryStorage(), { hetzner: fakeProvider() }, guard);
+    const fleet = testFleet(
+      new MemoryStorage(),
+      { hetzner: fakeProvider() },
+      acceptingSessionGuard(),
+    );
 
     const create = await fleet.fetch(
       request("POST", "/v1/leases", {
@@ -520,7 +510,7 @@ describe("fleet lease identity and idle", () => {
           provider: "hetzner",
           class: "standard",
           serverType: "cpx62",
-          ttlSeconds: 1200,
+          spendingLimitUSD: 2,
           sshPublicKey: "ssh-ed25519 test",
         },
       }),
@@ -530,6 +520,9 @@ describe("fleet lease identity and idle", () => {
     expect(body.bearer).toMatch(/^cbxu_/);
     expect(body.lease.id).toBe("cbx_cccccccccccc");
     expect(body.lease.owner).toBe("mpp:0xfeed");
+    expect(body.lease.sessionID).toBe("0xsession");
+    expect(body.lease.burnRateUSDPerMinute).toBeCloseTo(0.1 / 60, 6);
+    expect(body.lease.highestVoucherHeldUSD).toBe(0.02);
   });
 
   it("scopes list-leases to the lease bearer", async () => {
@@ -643,113 +636,200 @@ describe("fleet lease identity and idle", () => {
     expect(body.bearer).toBeUndefined();
   });
 
-  it("extends a lease and bumps ttlSeconds when no payment guard is configured", async () => {
+  it("heartbeat accepts a higher cumulative voucher and updates covered-until", async () => {
     const storage = new MemoryStorage();
-    const fleet = testFleet(storage);
+    const fleet = testFleet(storage, {}, acceptingSessionGuard({ amountUSD: 0.03 }));
     const createdAt = new Date();
-    const initialExpiresAt = new Date(createdAt.getTime() + 600 * 1000);
     storage.seed(
-      "lease:cbx_extendable01",
+      "lease:cbx_metered0001",
       testLease({
-        id: "cbx_extendable01",
+        id: "cbx_metered0001",
         owner: "peter@example.com",
         org: "openclaw",
         createdAt: createdAt.toISOString(),
         updatedAt: createdAt.toISOString(),
         lastTouchedAt: createdAt.toISOString(),
-        ttlSeconds: 600,
-        idleTimeoutSeconds: 1800,
+        sessionID: "0xsession",
+        burnRateUSDPerMinute: 0.01,
+        billingStartedAt: createdAt.toISOString(),
+        highestVoucherHeldUSD: 0.02,
+        highestVoucherHeldUnits: "20000",
+        spendingLimitUSD: 2,
         estimatedHourlyUSD: 0.1,
-        maxEstimatedUSD: 0.1,
-        expiresAt: initialExpiresAt.toISOString(),
+        maxEstimatedUSD: 2,
       }),
     );
 
-    const extend = await fleet.fetch(
-      request("POST", "/v1/leases/cbx_extendable01/extend", {
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_metered0001/heartbeat", {
         headers: {
           "x-crabbox-owner": "peter@example.com",
           "x-crabbox-org": "openclaw",
+          authorization: "Payment stub-credential",
         },
-        body: { ttlSecondsAdded: 300 },
+        body: {},
       }),
     );
-    expect(extend.status).toBe(200);
-    const body = (await extend.json()) as { lease: LeaseRecord };
-    expect(body.lease.ttlSeconds).toBe(900);
-    expect(body.lease.extensions).toHaveLength(1);
-    expect(body.lease.extensions?.[0]?.ttlSecondsAdded).toBe(300);
-    expect(Date.parse(body.lease.expiresAt)).toBeGreaterThan(initialExpiresAt.getTime());
+    expect(heartbeat.status).toBe(200);
+    const body = (await heartbeat.json()) as { lease: LeaseRecord };
+    expect(body.lease.highestVoucherHeldUSD).toBe(0.03);
+    expect(Date.parse(body.lease.paymentCoveredUntil ?? "")).toBeGreaterThan(createdAt.getTime());
   });
 
-  it("returns 402 from /extend when payment guard rejects", async () => {
+  it("returns 402 from heartbeat when a metered lease is underfunded", async () => {
     const storage = new MemoryStorage();
-    const guard: PaymentGuard = {
-      charge: () => async () => ({
-        status: 402,
-        challenge: new Response(null, {
-          status: 402,
-          headers: {
-            "www-authenticate": 'Payment realm="crabbox", method="tempo", intent="charge"',
-          },
-        }),
-      }),
-    };
-    const fleet = testFleet(storage, {}, guard);
+    const fleet = testFleet(storage, {}, challengeSessionGuard());
     storage.seed(
       "lease:cbx_unpaid000001",
       testLease({
         id: "cbx_unpaid000001",
         owner: "mpp:0xfeed",
         org: "default-org",
-        ttlSeconds: 600,
-        idleTimeoutSeconds: 1800,
+        sessionID: "0xsession",
+        burnRateUSDPerMinute: 0.01,
+        billingStartedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+        highestVoucherHeldUSD: 0.01,
         estimatedHourlyUSD: 0.1,
-        maxEstimatedUSD: 0.1,
+        maxEstimatedUSD: 2,
         expiresAt: new Date(Date.now() + 600 * 1000).toISOString(),
       }),
     );
-    const extend = await fleet.fetch(
-      request("POST", "/v1/leases/cbx_unpaid000001/extend", {
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_unpaid000001/heartbeat", {
         headers: {
           "x-crabbox-auth": "mpp",
           "x-crabbox-owner": "mpp:0xfeed",
           "x-crabbox-org": "default-org",
         },
-        body: { ttlSecondsAdded: 300 },
+        body: {},
       }),
     );
-    expect(extend.status).toBe(402);
+    expect(heartbeat.status).toBe(402);
   });
 
-  it("rejects /extend on an inactive lease", async () => {
+  it("release settles the highest voucher before marking the lease released", async () => {
     const storage = new MemoryStorage();
-    const fleet = testFleet(storage);
-    storage.seed(
-      "lease:cbx_inactive0001",
-      testLease({
-        id: "cbx_inactive0001",
-        owner: "peter@example.com",
-        org: "openclaw",
-        state: "released",
+    const settled: string[] = [];
+    const fleet = testFleet(
+      storage,
+      { hetzner: fakeProvider() },
+      acceptingSessionGuard({
+        amountUSD: 0.05,
+        settle: async (channelID) => {
+          settled.push(channelID);
+          return "0xtx";
+        },
       }),
     );
-    const extend = await fleet.fetch(
-      request("POST", "/v1/leases/cbx_inactive0001/extend", {
+    storage.seed(
+      "lease:cbx_release0001",
+      testLease({
+        id: "cbx_release0001",
+        owner: "peter@example.com",
+        org: "openclaw",
+        sessionID: "0xsession",
+        burnRateUSDPerMinute: 0.01,
+        billingStartedAt: new Date().toISOString(),
+        highestVoucherHeldUSD: 0.02,
+        highestVoucherHeldUnits: "20000",
+      }),
+    );
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_release0001/release", {
         headers: {
           "x-crabbox-owner": "peter@example.com",
           "x-crabbox-org": "openclaw",
+          authorization: "Payment stub-credential",
         },
-        body: { ttlSecondsAdded: 300 },
+        body: { delete: true },
       }),
     );
-    expect(extend.status).toBe(409);
+    expect(release.status).toBe(200);
+    const body = (await release.json()) as { lease: LeaseRecord };
+    expect(body.lease.state).toBe("released");
+    expect(body.lease.settlementStatus).toBe("submitted");
+    expect(body.lease.settlementTx).toBe("0xtx");
+    expect(settled).toEqual(["0xsession"]);
   });
 
-  it("provisions and attaches the receipt when payment guard accepts", async () => {
+  it("alarm hibernates underfunded metered leases with a provider snapshot", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, { imageID: "382206402" }),
+    });
+    storage.seed(
+      "lease:cbx_sleep000001",
+      testLease({
+        id: "cbx_sleep000001",
+        sessionID: "0xsession",
+        burnRateUSDPerMinute: 0.01,
+        billingStartedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+        highestVoucherHeldUSD: 0.01,
+        highestVoucherHeldUnits: "10000",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    );
+
+    await fleet.alarm();
+
+    const lease = storage.value<LeaseRecord>("lease:cbx_sleep000001");
+    expect(lease?.state).toBe("hibernated");
+    expect(lease?.snapshotID).toBe("382206402");
+    expect(lease?.hibernatedAt).toBeTruthy();
+  });
+
+  it("resumes a hibernated lease from its saved snapshot with a new session", async () => {
+    const storage = new MemoryStorage();
+    let observedImage = "";
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider((config) => {
+          observedImage = config.image ?? "";
+        }),
+      },
+      acceptingSessionGuard({ amountUSD: 0.02 }),
+    );
+    storage.seed(
+      "lease:cbx_resume00001",
+      testLease({
+        id: "cbx_resume00001",
+        state: "hibernated",
+        snapshotID: "382206402",
+        sshPublicKey: "ssh-ed25519 test",
+        sessionID: "0xoldsession",
+        highestVoucherHeldUSD: 0.01,
+        spendingLimitUSD: 2,
+        burnRateUSDPerMinute: 0.01,
+      }),
+    );
+
+    const resume = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_resume00001/resume", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+          authorization: "Payment stub-credential",
+        },
+        body: { spendingLimitUSD: 3 },
+      }),
+    );
+
+    expect(resume.status).toBe(200);
+    const body = (await resume.json()) as { lease: LeaseRecord };
+    expect(body.lease.state).toBe("active");
+    expect(body.lease.resumedFromSnapshotID).toBe("382206402");
+    expect(body.lease.snapshotID).toBeUndefined();
+    expect(body.lease.spendingLimitUSD).toBe(3);
+    expect(observedImage).toBe("382206402");
+  });
+
+  it("provisions and attaches the receipt when session guard accepts", async () => {
     let receiptHeader = "";
-    const guard: PaymentGuard = {
-      charge: () => async () => ({
+    const fleet = testFleet(
+      new MemoryStorage(),
+      { hetzner: fakeProvider() },
+      acceptingSessionGuard({
         withReceipt: (response: Response) => {
           const headers = new Headers(response.headers);
           headers.set("payment-receipt", "stub-receipt-ok");
@@ -760,8 +840,7 @@ describe("fleet lease identity and idle", () => {
           });
         },
       }),
-    };
-    const fleet = testFleet(new MemoryStorage(), { hetzner: fakeProvider() }, guard);
+    );
 
     const create = await fleet.fetch(
       request("POST", "/v1/leases", {
@@ -775,7 +854,7 @@ describe("fleet lease identity and idle", () => {
           provider: "hetzner",
           class: "standard",
           serverType: "cpx62",
-          ttlSeconds: 1200,
+          spendingLimitUSD: 2,
           sshPublicKey: "ssh-ed25519 test",
         },
       }),
@@ -1563,6 +1642,45 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function challengeSessionGuard(): PaymentGuard {
+  return {
+    session: (_amountUSD, options) => async () => ({
+      status: 402,
+      challenge: new Response(null, {
+        status: 402,
+        headers: {
+          "www-authenticate": `Payment realm="crabbox", method="tempo", intent="session", limit="${options.spendingLimitUSD}"`,
+        },
+      }),
+    }),
+    settle: async () => undefined,
+    settleZero: async () => {},
+  };
+}
+
+function acceptingSessionGuard(
+  options: {
+    amountUSD?: number;
+    settle?: (channelID: string) => Promise<string | undefined>;
+    withReceipt?: (response: Response) => Response;
+  } = {},
+): PaymentGuard {
+  return {
+    session: () => async () => ({
+      accepted: {
+        channelID: "0xsession",
+        cumulativeAmountUnits: String(Math.round((options.amountUSD ?? 0.02) * 1_000_000)),
+        cumulativeAmountUSD: options.amountUSD ?? 0.02,
+        payer: "0xfeed",
+        sessionKey: "0xsessionkey",
+      },
+      withReceipt: options.withReceipt ?? ((response: Response) => response),
+    }),
+    settle: options.settle ?? (async () => undefined),
+    settleZero: async () => {},
+  };
 }
 
 function testFleet(

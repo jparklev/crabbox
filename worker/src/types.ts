@@ -36,6 +36,8 @@ export interface Env {
   CRABBOX_MPP_CURRENCY?: string;
   CRABBOX_MPP_DECIMALS?: string;
   CRABBOX_MPP_SECRET_KEY?: string;
+  CRABBOX_MPP_SETTLEMENT_PRIVATE_KEY?: string;
+  CRABBOX_MPP_RPC_URL?: string;
   CRABBOX_MPP_TESTNET?: string;
   CRABBOX_MPP_REALM?: string;
 }
@@ -73,6 +75,8 @@ export interface LeaseRequest {
   workRoot?: string;
   ttlSeconds?: number;
   idleTimeoutSeconds?: number;
+  spendingLimitUSD?: number;
+  allowanceUSD?: number;
   keep?: boolean;
   sshPublicKey?: string;
 }
@@ -111,7 +115,7 @@ export interface LeaseRecord {
   idleTimeoutSeconds?: number;
   estimatedHourlyUSD: number;
   maxEstimatedUSD: number;
-  state: "active" | "released" | "expired" | "failed";
+  state: "active" | "released" | "expired" | "failed" | "hibernated";
   createdAt: string;
   updatedAt: string;
   lastTouchedAt?: string;
@@ -122,6 +126,30 @@ export interface LeaseRecord {
   totalChargedUSD?: number;
   /** 0x… wallet that funded this lease, when paid via MPP. */
   payer?: string;
+  /** Tempo session/channel id that meters this lease. */
+  sessionID?: string;
+  /** Authorized voucher signer for the active Tempo session. */
+  sessionKey?: string;
+  /** Agent-authorized maximum session allowance. */
+  spendingLimitUSD?: number;
+  /** Exact resolved machine burn rate. */
+  burnRateUSDPerMinute?: number;
+  /** Highest cumulative voucher currently held by the broker. */
+  highestVoucherHeldUSD?: number;
+  /** Highest cumulative voucher in token base units. */
+  highestVoucherHeldUnits?: string;
+  billingStartedAt?: string;
+  paymentCoveredUntil?: string;
+  lastLiquidityCheckAt?: string;
+  settlementTx?: string;
+  settlementStatus?: "pending" | "submitted" | "failed" | "skipped";
+  settledAt?: string;
+  snapshotID?: string;
+  snapshotName?: string;
+  hibernatedAt?: string;
+  resumedFromSnapshotID?: string;
+  resumeRequest?: LeaseRequest;
+  sshPublicKey?: string;
 }
 
 export interface ProvisioningAttempt {

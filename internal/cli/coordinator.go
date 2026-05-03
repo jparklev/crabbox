@@ -70,6 +70,12 @@ type CoordinatorLease struct {
 	UpdatedAt            string                `json:"updatedAt,omitempty"`
 	LastTouchedAt        string                `json:"lastTouchedAt,omitempty"`
 	ExpiresAt            string                `json:"expiresAt"`
+	SpendingLimitUSD     float64               `json:"spendingLimitUSD,omitempty"`
+	BurnRateUSDPerMinute float64               `json:"burnRateUSDPerMinute,omitempty"`
+	HighestVoucherUSD    float64               `json:"highestVoucherHeldUSD,omitempty"`
+	PaymentCoveredUntil  string                `json:"paymentCoveredUntil,omitempty"`
+	SessionID            string                `json:"sessionID,omitempty"`
+	SnapshotID           string                `json:"snapshotID,omitempty"`
 }
 
 type ProvisioningAttempt struct {
@@ -345,6 +351,7 @@ func (c *CoordinatorClient) CreateLeaseWithBearer(ctx context.Context, cfg Confi
 		"workRoot":           cfg.WorkRoot,
 		"ttlSeconds":         int(cfg.TTL.Seconds()),
 		"idleTimeoutSeconds": int(cfg.IdleTimeout.Seconds()),
+		"spendingLimitUSD":   cfg.AllowanceUSD,
 		"keep":               keep,
 		"sshPublicKey":       publicKey,
 	}
@@ -352,20 +359,10 @@ func (c *CoordinatorClient) CreateLeaseWithBearer(ctx context.Context, cfg Confi
 		body["imageTag"] = cfg.ImageTag
 	}
 	var res CoordinatorLeaseResponse
-	err := c.do(ctx, http.MethodPost, "/v1/leases", body, &res)
-	if err == nil {
-		return res, nil
-	}
-	encoded, mErr := json.Marshal(body)
-	if mErr != nil {
+	if err := c.doWithMPPXRetry(ctx, http.MethodPost, "/v1/leases", body, &res); err != nil {
 		return CoordinatorLeaseResponse{}, err
 	}
-	if retryErr := retryWithMPPX(ctx, c, http.MethodPost, "/v1/leases", encoded, err, &res); retryErr == nil {
-		return res, nil
-	} else if !errors.Is(retryErr, errMppxNotApplicable) {
-		return CoordinatorLeaseResponse{}, retryErr
-	}
-	return CoordinatorLeaseResponse{}, err
+	return res, nil
 }
 
 func (c *CoordinatorClient) GetLease(ctx context.Context, id string) (CoordinatorLease, error) {
@@ -380,7 +377,9 @@ func (c *CoordinatorClient) ReleaseLease(ctx context.Context, id string, deleteS
 	var res struct {
 		Lease CoordinatorLease `json:"lease"`
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/release", map[string]any{"delete": deleteServer}, &res)
+	path := "/v1/leases/" + url.PathEscape(id) + "/release"
+	body := map[string]any{"delete": deleteServer}
+	err := c.doWithMPPXRetry(ctx, http.MethodPost, path, body, &res)
 	return res.Lease, err
 }
 
@@ -396,8 +395,27 @@ func (c *CoordinatorClient) heartbeatLease(ctx context.Context, id string, idleT
 	var res struct {
 		Lease CoordinatorLease `json:"lease"`
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/heartbeat", heartbeatRequestBody(idleTimeout), &res)
+	path := "/v1/leases/" + url.PathEscape(id) + "/heartbeat"
+	body := heartbeatRequestBody(idleTimeout)
+	err := c.doWithMPPXRetry(ctx, http.MethodPost, path, body, &res)
 	return res.Lease, err
+}
+
+func (c *CoordinatorClient) doWithMPPXRetry(ctx context.Context, method, path string, body any, out any) error {
+	err := c.do(ctx, method, path, body, out)
+	if err == nil {
+		return nil
+	}
+	encoded, mErr := json.Marshal(body)
+	if mErr != nil {
+		return err
+	}
+	if retryErr := retryWithMPPX(ctx, c, method, path, encoded, err, out); retryErr == nil {
+		return nil
+	} else if !errors.Is(retryErr, errMppxNotApplicable) {
+		return retryErr
+	}
+	return err
 }
 
 func heartbeatRequestBody(idleTimeout *time.Duration) map[string]any {

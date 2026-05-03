@@ -41,7 +41,7 @@ The Worker stores coordinator leases as `active`, `released`, `expired`, or `fai
 
 ## Heartbeats And Idle Timeout
 
-`crabbox warmup --idle-timeout 30m` and `crabbox run --idle-timeout 30m` set inactivity expiry. `--ttl` is a separate maximum wall-clock lifetime. The CLI sends coordinator heartbeats while a lease is in use; each heartbeat updates `lastTouchedAt` and recomputes `expiresAt = min(createdAt + ttl, lastTouchedAt + idleTimeout)`.
+`crabbox warmup --allowance-usd 25` and `crabbox run --allowance-usd 25` set the spending limit for metered coordinator leases. The CLI sends coordinator heartbeats every 15 seconds; for paid leases each heartbeat advances the cumulative Tempo voucher. Non-metered leases still use `--idle-timeout` and `--ttl` to recompute `expiresAt = min(createdAt + ttl, lastTouchedAt + idleTimeout)`.
 
 Direct-provider mode does not have a central heartbeat or alarm. It labels machines with `created_at`, `last_touched_at`, `idle_timeout_secs`, `expires_at`, `state`, `lease`, and `slug`; `crabbox cleanup` uses those labels conservatively.
 

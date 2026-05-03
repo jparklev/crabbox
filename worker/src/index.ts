@@ -1,7 +1,7 @@
 import { authenticateRequest, requestWithAuthContext, type AuthContext } from "./auth";
 import { FleetDurableObject } from "./fleet";
 import { json } from "./http";
-import { paymentConfigured } from "./payments";
+import { credentialPayer, parsePaymentCredential, paymentConfigured } from "./payments";
 import type { Env } from "./types";
 
 const PAYER_HEADER = "x-crabbox-payer";
@@ -54,7 +54,12 @@ function mppEligible(request: Request, url: URL, env: Env): boolean {
   if (request.method !== "POST") {
     return false;
   }
-  if (url.pathname === "/v1/leases" || /^\/v1\/leases\/[^/]+\/extend$/.test(url.pathname)) {
+  if (
+    url.pathname === "/v1/leases" ||
+    /^\/v1\/leases\/[^/]+\/heartbeat$/.test(url.pathname) ||
+    /^\/v1\/leases\/[^/]+\/release$/.test(url.pathname) ||
+    /^\/v1\/leases\/[^/]+\/resume$/.test(url.pathname)
+  ) {
     return paymentConfigured(env);
   }
   return false;
@@ -84,25 +89,7 @@ function mppAuth(request: Request, env: Env): AuthContext {
 }
 
 export function extractCredentialPayer(request: Request): string | undefined {
-  const auth = request.headers.get("authorization");
-  if (!auth?.startsWith("Payment ")) {
-    return undefined;
-  }
-  try {
-    const padded = auth
-      .slice(8)
-      .replaceAll("-", "+")
-      .replaceAll("_", "/")
-      .padEnd(Math.ceil((auth.length - 8) / 4) * 4, "=");
-    const decoded = JSON.parse(atob(padded)) as { source?: string };
-    if (typeof decoded.source !== "string") {
-      return undefined;
-    }
-    const match = /:0x([a-fA-F0-9]{40})$/.exec(decoded.source);
-    return match ? `0x${match[1]}` : undefined;
-  } catch {
-    return undefined;
-  }
+  return credentialPayer(parsePaymentCredential(request));
 }
 
 export async function isAuthorized(

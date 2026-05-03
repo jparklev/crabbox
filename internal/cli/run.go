@@ -35,6 +35,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	market := fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand")
 	ttl := fs.Duration("ttl", defaults.TTL, "maximum lease lifetime")
 	idleTimeout := fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout")
+	allowanceUSD := fs.Float64("allowance-usd", defaults.AllowanceUSD, "coordinator spending allowance in USD")
 	keep := fs.Bool("keep", true, "keep server after warmup")
 	actionsRunner := fs.Bool("actions-runner", false, "register this box as an ephemeral GitHub Actions runner")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
@@ -66,12 +67,18 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	if flagWasSet(fs, "idle-timeout") {
 		cfg.IdleTimeout = *idleTimeout
 	}
+	if flagWasSet(fs, "allowance-usd") {
+		cfg.AllowanceUSD = *allowanceUSD
+	}
 	applyBlacksmithFlagOverrides(&cfg, fs, blacksmithFlags)
 	if cfg.TTL <= 0 {
 		return exit(2, "ttl must be positive")
 	}
 	if cfg.IdleTimeout <= 0 {
 		return exit(2, "idle timeout must be positive")
+	}
+	if cfg.AllowanceUSD <= 0 {
+		return exit(2, "allowance must be positive")
 	}
 	repo, err := findRepo()
 	if err != nil {
@@ -141,6 +148,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	market := fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand")
 	ttl := fs.Duration("ttl", defaults.TTL, "maximum lease lifetime")
 	idleTimeout := fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout")
+	allowanceUSD := fs.Float64("allowance-usd", defaults.AllowanceUSD, "coordinator spending allowance in USD")
 	leaseIDFlag := fs.String("id", "", "existing lease or server id")
 	keep := fs.Bool("keep", false, "keep server after command")
 	noSync := fs.Bool("no-sync", false, "skip rsync")
@@ -187,6 +195,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if flagWasSet(fs, "idle-timeout") {
 		cfg.IdleTimeout = *idleTimeout
 	}
+	if flagWasSet(fs, "allowance-usd") {
+		cfg.AllowanceUSD = *allowanceUSD
+	}
 	if flagWasSet(fs, "checksum") {
 		cfg.Sync.Checksum = *checksumSync
 	}
@@ -199,6 +210,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	if cfg.IdleTimeout <= 0 {
 		return exit(2, "idle timeout must be positive")
+	}
+	if cfg.AllowanceUSD <= 0 {
+		return exit(2, "allowance must be positive")
 	}
 	repo, err := findRepo()
 	if err != nil {
@@ -650,7 +664,7 @@ func (a App) acquireCoordinator(ctx context.Context, cfg Config, coord *Coordina
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
 	ensureAWSSSHCIDRs(ctx, &cfg)
-	fmt.Fprintf(a.Stderr, "coordinator lease class=%s preferred_type=%s keep=%v slug=%s idle_timeout=%s ttl=%s\n", cfg.Class, cfg.ServerType, keep, slug, cfg.IdleTimeout, cfg.TTL)
+	fmt.Fprintf(a.Stderr, "coordinator lease class=%s preferred_type=%s keep=%v slug=%s idle_timeout=%s allowance_usd=%.2f\n", cfg.Class, cfg.ServerType, keep, slug, cfg.IdleTimeout, cfg.AllowanceUSD)
 	lease, err := coord.CreateLease(ctx, cfg, publicKey, keep, leaseID, slug)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
@@ -880,17 +894,10 @@ func isCoordinatorNotFoundError(err error) bool {
 }
 
 func heartbeatInterval(ttl time.Duration) time.Duration {
-	if ttl <= 0 {
-		return time.Minute
-	}
-	interval := ttl / 3
-	if interval < 5*time.Second {
+	if ttl > 0 && ttl < 15*time.Second {
 		return 5 * time.Second
 	}
-	if interval > time.Minute {
-		return time.Minute
-	}
-	return interval
+	return 15 * time.Second
 }
 
 func (a App) touchLeaseBestEffort(ctx context.Context, cfg Config, identifier, leaseID string) {
