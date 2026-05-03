@@ -49,10 +49,6 @@ export function isSessionChallenge(result: SessionResult): result is { challenge
 
 export class MppxConfigError extends Error {}
 
-export function paymentEnabled(env: Env): boolean {
-  return Boolean(env.CRABBOX_MPP_RECIPIENT?.trim());
-}
-
 export function paymentGuardFromEnv(
   env: Env,
   storage?: DurableObjectStorage,
@@ -147,7 +143,7 @@ export function paymentGuardFromEnv(
 }
 
 export function paymentConfigured(env: Env): boolean {
-  if (!paymentEnabled(env)) {
+  if (!env.CRABBOX_MPP_RECIPIENT?.trim()) {
     return false;
   }
   try {
