@@ -80,7 +80,7 @@ printf '%%s' '%s'
 	body := []byte(`{"leaseID":"cbx_stub00000001"}`)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := retryWithMPPX(ctx, client, http.MethodPost, "/v1/leases", body, originalErr, &res); err != nil {
+	if err := retryWithMPPX(ctx, client, "/v1/leases", body, originalErr, &res); err != nil {
 		t.Fatalf("retryWithMPPX: %v", err)
 	}
 	if res.Lease.ID != "cbx_stub00000001" {
@@ -109,14 +109,14 @@ printf '%%s' '%s'
 func TestRetryWithMPPX_NotApplicable(t *testing.T) {
 	t.Setenv("CRABBOX_MPP_PAY", "")
 	original := &coordinatorHTTPError{Status: 402}
-	err := retryWithMPPX(context.Background(), nil, http.MethodPost, "/v1/leases", nil, original, nil)
+	err := retryWithMPPX(context.Background(), nil, "/v1/leases", nil, original, nil)
 	if !errors.Is(err, errMppxNotApplicable) {
 		t.Fatalf("err = %v, want errMppxNotApplicable", err)
 	}
 
 	t.Setenv("CRABBOX_MPP_PAY", "auto")
 	original500 := &coordinatorHTTPError{Status: 500}
-	err = retryWithMPPX(context.Background(), nil, http.MethodPost, "/v1/leases", nil, original500, nil)
+	err = retryWithMPPX(context.Background(), nil, "/v1/leases", nil, original500, nil)
 	if !errors.Is(err, errMppxNotApplicable) {
 		t.Fatalf("err = %v, want errMppxNotApplicable", err)
 	}

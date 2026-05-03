@@ -359,7 +359,7 @@ func (c *CoordinatorClient) CreateLeaseWithBearer(ctx context.Context, cfg Confi
 		body["imageTag"] = cfg.ImageTag
 	}
 	var res CoordinatorLeaseResponse
-	if err := c.doWithMPPXRetry(ctx, http.MethodPost, "/v1/leases", body, &res); err != nil {
+	if err := c.doPostWithMPPXRetry(ctx, "/v1/leases", body, &res); err != nil {
 		return CoordinatorLeaseResponse{}, err
 	}
 	return res, nil
@@ -379,7 +379,7 @@ func (c *CoordinatorClient) ReleaseLease(ctx context.Context, id string, deleteS
 	}
 	path := "/v1/leases/" + url.PathEscape(id) + "/release"
 	body := map[string]any{"delete": deleteServer}
-	err := c.doWithMPPXRetry(ctx, http.MethodPost, path, body, &res)
+	err := c.doPostWithMPPXRetry(ctx, path, body, &res)
 	return res.Lease, err
 }
 
@@ -397,12 +397,12 @@ func (c *CoordinatorClient) heartbeatLease(ctx context.Context, id string, idleT
 	}
 	path := "/v1/leases/" + url.PathEscape(id) + "/heartbeat"
 	body := heartbeatRequestBody(idleTimeout)
-	err := c.doWithMPPXRetry(ctx, http.MethodPost, path, body, &res)
+	err := c.doPostWithMPPXRetry(ctx, path, body, &res)
 	return res.Lease, err
 }
 
-func (c *CoordinatorClient) doWithMPPXRetry(ctx context.Context, method, path string, body any, out any) error {
-	err := c.do(ctx, method, path, body, out)
+func (c *CoordinatorClient) doPostWithMPPXRetry(ctx context.Context, path string, body any, out any) error {
+	err := c.do(ctx, http.MethodPost, path, body, out)
 	if err == nil {
 		return nil
 	}
@@ -410,7 +410,7 @@ func (c *CoordinatorClient) doWithMPPXRetry(ctx context.Context, method, path st
 	if mErr != nil {
 		return err
 	}
-	if retryErr := retryWithMPPX(ctx, c, method, path, encoded, err, out); retryErr == nil {
+	if retryErr := retryWithMPPX(ctx, c, path, encoded, err, out); retryErr == nil {
 		return nil
 	} else if !errors.Is(retryErr, errMppxNotApplicable) {
 		return retryErr

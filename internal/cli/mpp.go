@@ -102,7 +102,7 @@ func parseMppxIncludeOutput(data []byte) (int, []byte, error) {
 func retryWithMPPX(
 	ctx context.Context,
 	c *CoordinatorClient,
-	method, path string,
+	path string,
 	body []byte,
 	originalErr error,
 	out any,
@@ -117,9 +117,6 @@ func retryWithMPPX(
 	if !mppxAvailable() {
 		return fmt.Errorf("%w; install mppx (npm i -g mppx) and configure an account to enable automatic payment", originalErr)
 	}
-	if method != http.MethodPost {
-		return errMppxNotApplicable
-	}
 	headers := http.Header{}
 	if owner := localCoordinatorOwner(); owner != "" {
 		headers.Set("X-Crabbox-Owner", owner)
@@ -133,7 +130,7 @@ func retryWithMPPX(
 	}
 	if status < 200 || status >= 300 {
 		return &coordinatorHTTPError{
-			Method: method,
+			Method: http.MethodPost,
 			Path:   path,
 			Status: status,
 			Body:   strings.TrimSpace(string(respBody)),
