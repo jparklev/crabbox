@@ -6,6 +6,7 @@ import type { Env, LeaseRecord, ProvisioningAttempt, RunRecord } from "../src/ty
 
 class MemoryStorage {
   private readonly values = new Map<string, unknown>();
+  private alarmTime: number | undefined;
 
   async get<T>(key: string): Promise<T | undefined> {
     return this.values.get(key) as T | undefined;
@@ -19,9 +20,13 @@ class MemoryStorage {
     this.values.delete(key);
   }
 
-  async deleteAlarm(): Promise<void> {}
+  async deleteAlarm(): Promise<void> {
+    this.alarmTime = undefined;
+  }
 
-  async setAlarm(_time: number): Promise<void> {}
+  async setAlarm(time: number): Promise<void> {
+    this.alarmTime = time;
+  }
 
   async list<T>({ prefix = "" }: { prefix?: string } = {}): Promise<Map<string, T>> {
     const matches = new Map<string, T>();
@@ -39,6 +44,10 @@ class MemoryStorage {
 
   value<T>(key: string): T | undefined {
     return this.values.get(key) as T | undefined;
+  }
+
+  alarm(): number | undefined {
+    return this.alarmTime;
   }
 }
 
@@ -638,8 +647,9 @@ describe("fleet lease identity and idle", () => {
 
   it("heartbeat accepts a higher cumulative voucher and updates covered-until", async () => {
     const storage = new MemoryStorage();
-    const fleet = testFleet(storage, {}, acceptingSessionGuard({ amountUSD: 0.03 }));
+    const fleet = testFleet(storage, {}, acceptingSessionGuard({ amountUSD: 0.06 }));
     const createdAt = new Date();
+    const billingStartedAt = new Date(createdAt.getTime() - 5 * 60_000);
     storage.seed(
       "lease:cbx_metered0001",
       testLease({
@@ -651,7 +661,7 @@ describe("fleet lease identity and idle", () => {
         lastTouchedAt: createdAt.toISOString(),
         sessionID: "0xsession",
         burnRateUSDPerMinute: 0.01,
-        billingStartedAt: createdAt.toISOString(),
+        billingStartedAt: billingStartedAt.toISOString(),
         highestVoucherHeldUSD: 0.02,
         highestVoucherHeldUnits: "20000",
         spendingLimitUSD: 2,
@@ -672,8 +682,49 @@ describe("fleet lease identity and idle", () => {
     );
     expect(heartbeat.status).toBe(200);
     const body = (await heartbeat.json()) as { lease: LeaseRecord };
+    expect(body.lease.highestVoucherHeldUSD).toBe(0.06);
+    expect(Date.parse(body.lease.paymentCoveredUntil ?? "")).toBeGreaterThan(createdAt.getTime());
+  });
+
+  it("heartbeat skips the payment challenge while voucher coverage remains sufficient", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, challengeSessionGuard());
+    const createdAt = new Date();
+    storage.seed(
+      "lease:cbx_covered0001",
+      testLease({
+        id: "cbx_covered0001",
+        owner: "peter@example.com",
+        org: "openclaw",
+        createdAt: createdAt.toISOString(),
+        updatedAt: createdAt.toISOString(),
+        lastTouchedAt: createdAt.toISOString(),
+        sessionID: "0xsession",
+        burnRateUSDPerMinute: 0.01,
+        billingStartedAt: createdAt.toISOString(),
+        highestVoucherHeldUSD: 0.03,
+        highestVoucherHeldUnits: "30000",
+        spendingLimitUSD: 2,
+        estimatedHourlyUSD: 0.1,
+        maxEstimatedUSD: 2,
+      }),
+    );
+
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_covered0001/heartbeat", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {},
+      }),
+    );
+
+    expect(heartbeat.status).toBe(200);
+    const body = (await heartbeat.json()) as { lease: LeaseRecord };
     expect(body.lease.highestVoucherHeldUSD).toBe(0.03);
     expect(Date.parse(body.lease.paymentCoveredUntil ?? "")).toBeGreaterThan(createdAt.getTime());
+    expect(storage.alarm() ?? 0).toBeGreaterThan(Date.now() + 120_000);
   });
 
   it("returns 402 from heartbeat when a metered lease is underfunded", async () => {
@@ -776,6 +827,40 @@ describe("fleet lease identity and idle", () => {
     expect(lease?.state).toBe("hibernated");
     expect(lease?.snapshotID).toBe("382206402");
     expect(lease?.hibernatedAt).toBeTruthy();
+  });
+
+  it("alarm hibernates metered leases when the channel has requested close", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(
+      storage,
+      { hetzner: fakeProvider(undefined, { imageID: "382206403" }) },
+      acceptingSessionGuard({
+        channel: async () =>
+          ({
+            closeRequestedAt: 1n,
+          }) as Awaited<ReturnType<PaymentGuard["channel"]>>,
+      }),
+    );
+    const createdAt = new Date();
+    storage.seed(
+      "lease:cbx_closing0001",
+      testLease({
+        id: "cbx_closing0001",
+        sessionID: "0xsession",
+        burnRateUSDPerMinute: 0.01,
+        billingStartedAt: createdAt.toISOString(),
+        highestVoucherHeldUSD: 0.03,
+        highestVoucherHeldUnits: "30000",
+        paymentCoveredUntil: new Date(createdAt.getTime() + 3 * 60_000).toISOString(),
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    );
+
+    await fleet.alarm();
+
+    const lease = storage.value<LeaseRecord>("lease:cbx_closing0001");
+    expect(lease?.state).toBe("hibernated");
+    expect(lease?.snapshotID).toBe("382206403");
   });
 
   it("resumes a hibernated lease from its saved snapshot with a new session", async () => {
@@ -1654,6 +1739,7 @@ function challengeSessionGuard(): PaymentGuard {
         },
       }),
     }),
+    channel: async () => undefined,
     settle: async () => undefined,
   };
 }
@@ -1661,6 +1747,7 @@ function challengeSessionGuard(): PaymentGuard {
 function acceptingSessionGuard(
   options: {
     amountUSD?: number;
+    channel?: PaymentGuard["channel"];
     settle?: (channelID: string) => Promise<string | undefined>;
     withReceipt?: (response: Response) => Response;
   } = {},
@@ -1676,6 +1763,7 @@ function acceptingSessionGuard(
       },
       withReceipt: options.withReceipt ?? ((response: Response) => response),
     }),
+    channel: options.channel ?? (async () => undefined),
     settle: options.settle ?? (async () => undefined),
   };
 }

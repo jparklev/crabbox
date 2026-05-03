@@ -4,6 +4,7 @@ import { MppxConfigError, paymentConfigured, paymentGuardFromEnv } from "../src/
 import type { Env } from "../src/types";
 
 const VALID_RECIPIENT = "0x3B098A4Bd4fd4414Be203c39057A82a00CD0d33F";
+const VALID_CURRENCY = "0x4200000000000000000000000000000000000006";
 const VALID_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function env(overrides: Partial<Env> = {}): Env {
@@ -11,6 +12,7 @@ function env(overrides: Partial<Env> = {}): Env {
     CRABBOX_DEFAULT_ORG: "default-org",
     CRABBOX_SESSION_SECRET: "session-secret",
     CRABBOX_MPP_RECIPIENT: VALID_RECIPIENT,
+    CRABBOX_MPP_CURRENCY: VALID_CURRENCY,
     CRABBOX_MPP_SECRET_KEY: "mpp-secret",
     CRABBOX_MPP_SETTLEMENT_PRIVATE_KEY: VALID_PRIVATE_KEY,
     ...overrides,
@@ -32,6 +34,16 @@ describe("paymentGuardFromEnv", () => {
     expect(() => paymentGuardFromEnv(env({ CRABBOX_MPP_CURRENCY: "0xnothex" }))).toThrow(
       MppxConfigError,
     );
+  });
+
+  it("throws when mainnet currency is unset", () => {
+    expect(() => paymentGuardFromEnv(env({ CRABBOX_MPP_CURRENCY: "" }))).toThrow(MppxConfigError);
+  });
+
+  it("allows the bundled pathUSD default on testnet", () => {
+    expect(
+      paymentGuardFromEnv(env({ CRABBOX_MPP_CURRENCY: "", CRABBOX_MPP_TESTNET: "true" })),
+    ).toBeDefined();
   });
 
   it("throws when MPP secret key is missing", () => {

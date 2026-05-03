@@ -35,6 +35,11 @@ CRABBOX_MPP_REALM                    override the auto-detected realm
 If `CRABBOX_MPP_RECIPIENT` is unset, the lease endpoint behaves as a normal
 authenticated coordinator endpoint.
 
+Mainnet deployments must set `CRABBOX_MPP_CURRENCY` explicitly so the broker
+cannot accidentally open channels against a testnet token. Testnet deployments
+may leave it unset; `CRABBOX_MPP_TESTNET=true` opts into the bundled pathUSD
+testnet default.
+
 ## Wire Format
 
 Lease creation uses a session challenge with the requested allowance:

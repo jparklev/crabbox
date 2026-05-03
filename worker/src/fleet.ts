@@ -33,6 +33,8 @@ import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } fr
 const fleetID = "default";
 const maxStoredRunLogBytes = 8 * 1024 * 1024;
 const runLogChunkBytes = 64 * 1024;
+const meteredLeaseGraceMs = 30_000;
+const liquidityCheckIntervalMs = 10 * 60_000;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -457,6 +459,10 @@ export class FleetDurableObject implements DurableObject {
     }
     const now = new Date();
     const dueUSD = Math.max(0, voucherRequiredUSD(lease, now) - (lease.highestVoucherHeldUSD ?? 0));
+    if (action === "heartbeat" && dueUSD <= 0) {
+      lease.paymentCoveredUntil = paymentCoveredUntil(lease, now).toISOString();
+      return undefined;
+    }
     const minUSD = action === "release" ? 0.000001 : dueUSD || 0.000001;
     const session = await guard.session(minUSD, {
       description: `Crabbox lease ${action}`,
@@ -469,12 +475,6 @@ export class FleetDurableObject implements DurableObject {
     if (session.accepted) {
       if (session.accepted.channelID.toLowerCase() !== lease.sessionID.toLowerCase()) {
         return json({ error: "session_mismatch" }, { status: 403 });
-      }
-      if (
-        (lease.highestVoucherHeldUSD ?? 0) > 0 &&
-        session.accepted.cumulativeAmountUSD < (lease.highestVoucherHeldUSD ?? 0)
-      ) {
-        return json({ error: "voucher_not_monotonic" }, { status: 409 });
       }
       applyAcceptedSession(lease, session.accepted);
     }
@@ -837,16 +837,22 @@ export class FleetDurableObject implements DurableObject {
 
   private async expireLeases(): Promise<void> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
-    const now = Date.now();
+    const now = new Date();
+    const nowMs = now.getTime();
     const active = [...leases.values()].filter((lease) => lease.state === "active");
     const expired = active.filter(
-      (lease) => !lease.sessionID && Date.parse(lease.expiresAt) <= now,
+      (lease) => !lease.sessionID && Date.parse(lease.expiresAt) <= nowMs,
     );
+    const metered = active.filter((lease) => Boolean(lease.sessionID));
     const uncovered = active.filter(
       (lease) =>
         Boolean(lease.sessionID) &&
-        voucherRequiredUSD(lease, new Date(now)) > (lease.highestVoucherHeldUSD ?? 0) + 0.000001,
+        voucherRequiredUSD(lease, now) > (lease.highestVoucherHeldUSD ?? 0) + 0.000001,
     );
+    const closing = await this.closeRequestedLeases(metered);
+    const hibernating = [
+      ...new Map([...uncovered, ...closing].map((lease) => [lease.id, lease])).values(),
+    ];
     await Promise.all(
       expired.map(async (lease) => {
         await this.deleteLeaseServer(lease).catch(() => undefined);
@@ -857,21 +863,53 @@ export class FleetDurableObject implements DurableObject {
         await this.putLease(lease);
       }),
     );
-    await Promise.all(uncovered.map((lease) => this.hibernateLease(lease)));
-    await this.liquidityCheckLongRunningLeases(active, new Date(now));
+    await Promise.all(hibernating.map((lease) => this.hibernateLease(lease)));
+    await this.liquidityCheckLongRunningLeases(active, now);
   }
 
   private async scheduleAlarm(): Promise<void> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+    const now = new Date();
     const active = [...leases.values()].filter((lease) => lease.state === "active");
     const activeExpiries = active
-      .map((lease) => (lease.sessionID ? Date.now() + 30_000 : Date.parse(lease.expiresAt)))
+      .map((lease) => this.nextAlarmTime(lease, now))
       .filter((time) => Number.isFinite(time));
     if (activeExpiries.length === 0) {
       await this.state.storage.deleteAlarm();
       return;
     }
     await this.state.storage.setAlarm(Math.min(...activeExpiries));
+  }
+
+  private nextAlarmTime(lease: LeaseRecord, now: Date): number {
+    if (!lease.sessionID) {
+      return Date.parse(lease.expiresAt);
+    }
+    const nowMs = now.getTime();
+    const coveredUntil = paymentCoveredUntil(lease, now).getTime() + meteredLeaseGraceMs;
+    const lastLiquidity = Date.parse(
+      lease.lastLiquidityCheckAt ?? lease.billingStartedAt ?? lease.createdAt,
+    );
+    const nextLiquidity =
+      (Number.isFinite(lastLiquidity) ? lastLiquidity : nowMs) + liquidityCheckIntervalMs;
+    return Math.min(coveredUntil, nextLiquidity);
+  }
+
+  private async closeRequestedLeases(leases: LeaseRecord[]): Promise<LeaseRecord[]> {
+    const guard = this.paymentGuard();
+    if (!guard) {
+      return [];
+    }
+    const checked = await Promise.all(
+      leases.map(async (lease) => {
+        if (!lease.sessionID) {
+          return undefined;
+        }
+        const channel = await guard.channel(lease.sessionID).catch(() => undefined);
+        return channel && channel.closeRequestedAt > 0n ? lease : undefined;
+      }),
+    );
+    return checked.filter((lease): lease is LeaseRecord => Boolean(lease));
   }
 
   private async hibernateLease(lease: LeaseRecord): Promise<void> {
@@ -927,7 +965,7 @@ export class FleetDurableObject implements DurableObject {
         .filter((lease) => lease.sessionID)
         .filter((lease) => {
           const last = Date.parse(lease.lastLiquidityCheckAt ?? lease.billingStartedAt ?? "");
-          return !Number.isFinite(last) || now.getTime() - last >= 10 * 60_000;
+          return !Number.isFinite(last) || now.getTime() - last >= liquidityCheckIntervalMs;
         })
         .map(async (lease) => {
           await this.settleLease(lease).catch(() => undefined);

@@ -34,6 +34,7 @@ export type SessionResult =
 
 export interface PaymentGuard {
   session(amountUSD: number, options: SessionOptions): (request: Request) => Promise<SessionResult>;
+  channel(channelID: string): Promise<Session.ChannelStore.State | undefined>;
   settle(channelID: string): Promise<string | undefined>;
 }
 
@@ -65,7 +66,12 @@ export function paymentGuardFromEnv(
   if (!isAddress(recipient)) {
     throw new MppxConfigError("CRABBOX_MPP_RECIPIENT must be a 0x… 20-byte address");
   }
-  const currency = env.CRABBOX_MPP_CURRENCY?.trim() || PATH_USD_TEMPO;
+  const testnet = parseBool(env.CRABBOX_MPP_TESTNET);
+  const configuredCurrency = env.CRABBOX_MPP_CURRENCY?.trim();
+  if (!testnet && !configuredCurrency) {
+    throw new MppxConfigError("CRABBOX_MPP_CURRENCY is required on Tempo mainnet");
+  }
+  const currency = configuredCurrency || PATH_USD_TEMPO;
   if (!isAddress(currency)) {
     throw new MppxConfigError("CRABBOX_MPP_CURRENCY must be a 0x… 20-byte address");
   }
@@ -87,7 +93,6 @@ export function paymentGuardFromEnv(
     );
   }
   const decimals = parseDecimals(env.CRABBOX_MPP_DECIMALS) ?? 6;
-  const testnet = parseBool(env.CRABBOX_MPP_TESTNET);
   const settlementAccount = privateKeyToAccount(settlementKey as Hex);
   const chain = testnet ? tempoTestnet : tempoChain;
   const walletClient = createWalletClient({
@@ -134,6 +139,8 @@ export function paymentGuardFromEnv(
       }
       return result;
     },
+    channel: async (channelID: string) =>
+      (await channelStore?.getChannel(channelID as Hex)) ?? undefined,
     settle: async (channelID: string) => {
       if (!channelStore) {
         return undefined;

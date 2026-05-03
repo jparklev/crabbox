@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import worker, { extractCredentialPayer } from "../src/index";
 import type { Env } from "../src/types";
 
+const VALID_CURRENCY = "0x4200000000000000000000000000000000000006";
+
 function paymentHeader(credential: {
   source?: string;
   challenge?: unknown;
@@ -60,6 +62,7 @@ describe("worker fetch routing", () => {
   it("routes unauthenticated POST /v1/leases through DO when MPP is configured", async () => {
     const { env, lastRequest } = fakeEnv({
       CRABBOX_MPP_RECIPIENT: "0x3B098A4Bd4fd4414Be203c39057A82a00CD0d33F",
+      CRABBOX_MPP_CURRENCY: VALID_CURRENCY,
       CRABBOX_MPP_SECRET_KEY: "test-mpp-secret",
     });
     const response = await worker.fetch(
@@ -78,6 +81,7 @@ describe("worker fetch routing", () => {
   it("propagates the credential payer onto x-crabbox-payer when MPP request carries one", async () => {
     const { env, lastRequest } = fakeEnv({
       CRABBOX_MPP_RECIPIENT: "0x3B098A4Bd4fd4414Be203c39057A82a00CD0d33F",
+      CRABBOX_MPP_CURRENCY: VALID_CURRENCY,
       CRABBOX_MPP_SECRET_KEY: "test-mpp-secret",
     });
     const credential = {
@@ -109,6 +113,7 @@ describe("worker fetch routing", () => {
     const { env, lastRequest } = fakeEnv({
       CRABBOX_ADMIN_TOKEN: "admin-token",
       CRABBOX_MPP_RECIPIENT: "0x3B098A4Bd4fd4414Be203c39057A82a00CD0d33F",
+      CRABBOX_MPP_CURRENCY: VALID_CURRENCY,
       CRABBOX_MPP_SECRET_KEY: "test-mpp-secret",
     });
     const credential = {
