@@ -99,20 +99,14 @@ export function paymentGuardFromEnv(
   });
   const store = storage ? doStorageStore(storage) : undefined;
   const channelStore = store ? Session.ChannelStore.fromStore(store) : undefined;
-  const tempoConfig: {
-    currency: `0x${string}`;
-    recipient: `0x${string}`;
-    decimals: number;
-    account: ReturnType<typeof privateKeyToAccount>;
-    testnet?: boolean;
-    store?: Store.AtomicStore;
-  } = { account: settlementAccount, currency, recipient, decimals };
-  if (testnet) {
-    tempoConfig.testnet = true;
-  }
-  if (store) {
-    tempoConfig.store = store;
-  }
+  const tempoConfig = {
+    account: settlementAccount,
+    currency,
+    decimals,
+    recipient,
+    ...(testnet ? { testnet } : {}),
+    ...(store ? { store } : {}),
+  };
   const secretKey = env.CRABBOX_MPP_SECRET_KEY;
   const realm = env.CRABBOX_MPP_REALM?.trim();
   const mppx = realm
