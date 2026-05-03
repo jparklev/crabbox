@@ -4,7 +4,6 @@ import { json } from "./http";
 import { credentialPayer, parsePaymentCredential, paymentConfigured } from "./payments";
 import type { Env } from "./types";
 
-const PAYER_HEADER = "x-crabbox-payer";
 const mppLeaseRoute = /^\/v1\/leases(?:$|\/[^/]+\/(?:heartbeat|release|resume)$)/;
 
 export { FleetDurableObject };
@@ -27,8 +26,7 @@ export default {
     }
     if (mppEligible(request, url, env)) {
       const ctx = mppAuth(request, env);
-      const forwarded = withPayerHeader(requestWithAuthContext(request, ctx), ctx);
-      return env.FLEET.get(fleetID).fetch(forwarded);
+      return env.FLEET.get(fleetID).fetch(requestWithAuthContext(request, ctx));
     }
     return json({ error: "unauthorized" }, { status: 401 });
   },
@@ -40,15 +38,6 @@ function upgradeAuthWithPayer(request: Request, auth: AuthContext): AuthContext 
     return auth;
   }
   return { ...auth, payer };
-}
-
-function withPayerHeader(request: Request, ctx: AuthContext): Request {
-  if (!ctx.payer) {
-    return request;
-  }
-  const headers = new Headers(request.headers);
-  headers.set(PAYER_HEADER, ctx.payer);
-  return new Request(request, { headers });
 }
 
 function mppEligible(request: Request, url: URL, env: Env): boolean {
