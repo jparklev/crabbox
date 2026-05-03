@@ -227,11 +227,8 @@ function withSessionLimit(response: Response, options: SessionOptions): Response
 }
 
 function parseDecimals(value: string | undefined): number | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 32 ? parsed : undefined;
+  const parsed = Number.parseInt(value ?? "", 10);
+  return value && Number.isFinite(parsed) && parsed >= 0 && parsed <= 32 ? parsed : undefined;
 }
 
 function isAddress(value: string): value is `0x${string}` {
