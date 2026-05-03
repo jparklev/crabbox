@@ -21,8 +21,9 @@ export default {
     const auth = await authenticateRequest(request, env);
     const fleetID = env.FLEET.idFromName("default");
     if (auth?.authorized) {
-      const upgraded = upgradeAuthWithPayer(request, auth);
-      return env.FLEET.get(fleetID).fetch(requestWithAuthContext(request, upgraded));
+      const payer = extractCredentialPayer(request);
+      const ctx = payer && auth.payer !== payer ? { ...auth, payer } : auth;
+      return env.FLEET.get(fleetID).fetch(requestWithAuthContext(request, ctx));
     }
     if (mppEligible(request, url, env)) {
       const ctx = mppAuth(request, env);
@@ -31,14 +32,6 @@ export default {
     return json({ error: "unauthorized" }, { status: 401 });
   },
 };
-
-function upgradeAuthWithPayer(request: Request, auth: AuthContext): AuthContext {
-  const payer = extractCredentialPayer(request);
-  if (!payer || auth.payer === payer) {
-    return auth;
-  }
-  return { ...auth, payer };
-}
 
 function mppEligible(request: Request, url: URL, env: Env): boolean {
   return request.method === "POST" && mppLeaseRoute.test(url.pathname) && paymentConfigured(env);
@@ -51,9 +44,7 @@ function mppAuth(request: Request, env: Env): AuthContext {
   // can never collide with a real email or login. The wallet is also exposed
   // via `payer` so cost-limits/audit can index on the funding source even if
   // the owner later upgrades to a GitHub identity.
-  const owner = payer
-    ? `mpp:${payer}`
-    : `mpp:${env.CRABBOX_MPP_RECIPIENT?.toLowerCase() ?? "anonymous"}`;
+  const owner = `mpp:${payer ?? env.CRABBOX_MPP_RECIPIENT?.toLowerCase() ?? "anonymous"}`;
   const ctx: AuthContext = {
     authorized: true,
     admin: false,

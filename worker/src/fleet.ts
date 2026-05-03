@@ -241,7 +241,6 @@ export class FleetDurableObject implements DurableObject {
       finalProviderHourlyUSD,
     );
     record.estimatedHourlyUSD = finalCost.hourlyUSD;
-    record.maxEstimatedUSD = spendingLimitUSD;
     record.burnRateUSDPerMinute = finalCost.hourlyUSD / 60;
     if (config.provider === "aws") {
       record.region = config.awsRegion;
@@ -302,11 +301,7 @@ export class FleetDurableObject implements DurableObject {
       const body = await optionalJson<{ idleTimeoutSeconds?: number }>(request);
       const now = new Date();
       const requestedIdleTimeoutSeconds = body.idleTimeoutSeconds;
-      if (
-        Number.isFinite(requestedIdleTimeoutSeconds) &&
-        requestedIdleTimeoutSeconds !== undefined &&
-        requestedIdleTimeoutSeconds > 0
-      ) {
+      if (typeof requestedIdleTimeoutSeconds === "number" && requestedIdleTimeoutSeconds > 0) {
         lease.idleTimeoutSeconds = clampLeaseSeconds(requestedIdleTimeoutSeconds, 86_400);
       }
       lease.updatedAt = now.toISOString();
@@ -843,9 +838,7 @@ export class FleetDurableObject implements DurableObject {
       (lease) => voucherRequiredUSD(lease, now) > (lease.highestVoucherHeldUSD ?? 0) + 0.000001,
     );
     const closing = await this.closeRequestedLeases(metered);
-    const hibernating = [
-      ...new Map([...uncovered, ...closing].map((lease) => [lease.id, lease])).values(),
-    ];
+    const hibernating = [...new Set([...uncovered, ...closing])];
     await Promise.all(
       expired.map(async (lease) => {
         await this.deleteLeaseServer(lease).catch(() => undefined);
