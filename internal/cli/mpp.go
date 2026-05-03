@@ -26,11 +26,6 @@ func mppxOptIn() bool {
 }
 
 // mppxAvailable reports whether the `mppx` binary can be located.
-func mppxAvailable() bool {
-	_, err := exec.LookPath("mppx")
-	return err == nil
-}
-
 // mppxJSONFetch shells out to the `mppx` CLI to perform a JSON HTTP request.
 // mppx handles the 402 → sign → retry cycle internally using the user's
 // configured account (MPPX_ACCOUNT, MPPX_PRIVATE_KEY, etc). Returns the
@@ -114,7 +109,7 @@ func retryWithMPPX(
 	if !errors.As(originalErr, &httpErr) || httpErr.Status != http.StatusPaymentRequired {
 		return errMppxNotApplicable
 	}
-	if !mppxAvailable() {
+	if _, err := exec.LookPath("mppx"); err != nil {
 		return fmt.Errorf("%w; install mppx (npm i -g mppx) and configure an account to enable automatic payment", originalErr)
 	}
 	headers := http.Header{}
