@@ -263,7 +263,6 @@ export class FleetDurableObject implements DurableObject {
     }
     if (guard && acceptedSession) {
       applyAcceptedSession(record, acceptedSession);
-      record.totalChargedUSD = acceptedSession.cumulativeAmountUSD;
       record.paymentCoveredUntil = paymentCoveredUntil(record, now).toISOString();
       record.expiresAt = record.paymentCoveredUntil;
     }
@@ -412,7 +411,6 @@ export class FleetDurableObject implements DurableObject {
       if (session.accepted) {
         applyAcceptedSession(lease, session.accepted);
         lease.spendingLimitUSD = spendingLimitUSD;
-        lease.totalChargedUSD = session.accepted.cumulativeAmountUSD;
       }
       attachReceipt = (response) => session.withReceipt(response);
     }
@@ -487,7 +485,6 @@ export class FleetDurableObject implements DurableObject {
         return json({ error: "voucher_not_monotonic" }, { status: 409 });
       }
       applyAcceptedSession(lease, session.accepted);
-      lease.totalChargedUSD = session.accepted.cumulativeAmountUSD;
     }
     lease.paymentCoveredUntil = paymentCoveredUntil(lease, now).toISOString();
     return undefined;

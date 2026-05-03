@@ -123,7 +123,6 @@ export interface LeaseRecord {
   releasedAt?: string;
   endedAt?: string;
   extensions?: LeaseExtension[];
-  totalChargedUSD?: number;
   /** 0x… wallet that funded this lease, when paid via MPP. */
   payer?: string;
   /** Tempo session/channel id that meters this lease. */
