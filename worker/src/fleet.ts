@@ -223,15 +223,7 @@ export class FleetDurableObject implements DurableObject {
       acceptedSession = session.accepted;
       attachReceipt = (response) => session.withReceipt(response);
     }
-    let provisioned: Awaited<ReturnType<CloudProvider["createServerWithFallback"]>>;
-    try {
-      provisioned = await provider.createServerWithFallback(config, leaseID, slug, owner);
-    } catch (error) {
-      if (guard && acceptedSession) {
-        await guard.settleZero(acceptedSession).catch(() => undefined);
-      }
-      throw error;
-    }
+    const provisioned = await provider.createServerWithFallback(config, leaseID, slug, owner);
     const { server, serverType, attempts } = provisioned;
     record.cloudID = server.cloudID;
     record.serverType = serverType;

@@ -35,7 +35,6 @@ export type SessionResult =
 export interface PaymentGuard {
   session(amountUSD: number, options: SessionOptions): (request: Request) => Promise<SessionResult>;
   settle(channelID: string): Promise<string | undefined>;
-  settleZero(_acceptance: SessionAcceptance): Promise<void>;
 }
 
 export interface SessionOptions {
@@ -150,10 +149,6 @@ export function paymentGuardFromEnv(
       return tempo.settle(channelStore, walletClient, channelID as Hex, {
         account: settlementAccount,
       });
-    },
-    settleZero: async () => {
-      // A failed provision must not be settled against the user. The open channel
-      // can remain unclaimed; settlement is intentionally skipped.
     },
   };
 }

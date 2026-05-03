@@ -1656,7 +1656,6 @@ function challengeSessionGuard(): PaymentGuard {
       }),
     }),
     settle: async () => undefined,
-    settleZero: async () => {},
   };
 }
 
@@ -1679,7 +1678,6 @@ function acceptingSessionGuard(
       withReceipt: options.withReceipt ?? ((response: Response) => response),
     }),
     settle: options.settle ?? (async () => undefined),
-    settleZero: async () => {},
   };
 }
 
