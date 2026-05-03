@@ -74,14 +74,11 @@ export function paymentGuardFromEnv(
     recipient,
     ...(store ? { store } : {}),
   };
-  const realm = env.CRABBOX_MPP_REALM?.trim();
-  const mppx = realm
-    ? Mppx.create({
-        methods: [tempo.session(tempoConfig)],
-        secretKey,
-        realm,
-      })
-    : Mppx.create({ methods: [tempo.session(tempoConfig)], secretKey });
+  const mppx = Mppx.create({
+    methods: [tempo.session(tempoConfig)],
+    secretKey,
+    ...(env.CRABBOX_MPP_REALM?.trim() ? { realm: env.CRABBOX_MPP_REALM.trim() } : {}),
+  });
   return {
     session: (amountUSD: number, options: SessionOptions) => async (request: Request) => {
       const response = await mppx.tempo.session({
