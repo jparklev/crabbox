@@ -51,7 +51,7 @@ A single `crabbox run` command walks through five phases:
 
 **1. Plan.** Load config (flags -> env -> repo -> user -> defaults). Mint a temporary lease ID and per-lease SSH key.
 
-**2. Lease.** `POST /v1/leases` to the broker with class, provider, TTL, idle timeout, slug, bootstrap options, and the SSH public key. Worker authenticates, then forwards to the Fleet Durable Object. Durable Object enforces active-lease and monthly spend caps, asks the provider for live pricing, reserves the worst-case TTL cost, provisions the machine, and returns host / SSH user / port / work root / expiry / lease ID / slug. CLI re-keys its local key dir if the broker assigned a different final lease ID.
+**2. Lease.** `POST /v1/leases` to the broker with class, provider, allowance, idle timeout, slug, bootstrap options, and the SSH public key. Worker authenticates, then forwards to the Fleet Durable Object. When Tempo payments are enabled, the first response is a `402` session challenge; the paid retry carries the initial two-minute voucher buffer. Durable Object enforces active-lease and monthly spend caps, asks the provider for live pricing, provisions the machine, and returns host / SSH user / port / work root / expiry / lease ID / slug / `burnRateUSDPerMinute`. CLI re-keys its local key dir if the broker assigned a different final lease ID.
 
 **3. Sync.** Wait for SSH and the `crabbox-ready` marker. Seed remote Git when possible. Compare local and remote sync fingerprints; skip rsync if nothing changed. Otherwise rsync the dirty checkout into `/work/crabbox/<lease>/<repo>`, run sanity checks, hydrate the configured base ref.
 
@@ -70,7 +70,7 @@ crabbox ssh --id blue-lobster
 crabbox stop blue-lobster
 ```
 
-While the CLI is using a lease it sends heartbeats; the Durable Object updates `lastTouchedAt` and recomputes idle expiry. If a warm lease goes untouched for the idle timeout, the alarm releases it.
+While the CLI is using a lease it sends heartbeats every 15 seconds. For metered leases, each heartbeat is also a cumulative voucher update. If a paid lease is no longer covered by the highest voucher, the alarm snapshots the disk, terminates compute, and leaves the lease hibernated for `/resume`. For non-metered leases, heartbeats update `lastTouchedAt` and recompute idle expiry.
 
 ## Brokered vs Direct Provider
 
@@ -123,7 +123,7 @@ The broker tracks two cost numbers per lease:
 
 ```text
 estimatedUSD   elapsed runtime cost so far
-reservedUSD    worst-case TTL cost reserved before provisioning
+reservedUSD    allowance or worst-case direct TTL cost held against limits
 ```
 
 Hourly price source order:

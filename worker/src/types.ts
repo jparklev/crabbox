@@ -32,6 +32,13 @@ export interface Env {
   CRABBOX_MAX_MONTHLY_USD?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_OWNER?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_ORG?: string;
+  CRABBOX_MPP_RECIPIENT?: string;
+  CRABBOX_MPP_CURRENCY?: string;
+  CRABBOX_MPP_DECIMALS?: string;
+  CRABBOX_MPP_SECRET_KEY?: string;
+  CRABBOX_MPP_SETTLEMENT_PRIVATE_KEY?: string;
+  CRABBOX_MPP_RPC_URL?: string;
+  CRABBOX_MPP_REALM?: string;
 }
 
 export interface LeaseRequest {
@@ -47,6 +54,7 @@ export interface LeaseRequest {
   image?: string;
   awsRegion?: string;
   awsAMI?: string;
+  imageTag?: string;
   awsSGID?: string;
   awsSubnetID?: string;
   awsProfile?: string;
@@ -66,11 +74,19 @@ export interface LeaseRequest {
   workRoot?: string;
   ttlSeconds?: number;
   idleTimeoutSeconds?: number;
+  spendingLimitUSD?: number;
+  allowanceUSD?: number;
   keep?: boolean;
   sshPublicKey?: string;
 }
 
 export type Provider = "hetzner" | "aws";
+
+export interface LeaseExtension {
+  at: string;
+  ttlSecondsAdded: number;
+  amountUSD: number;
+}
 
 export interface LeaseRecord {
   id: string;
@@ -98,13 +114,33 @@ export interface LeaseRecord {
   idleTimeoutSeconds?: number;
   estimatedHourlyUSD: number;
   maxEstimatedUSD: number;
-  state: "active" | "released" | "expired" | "failed";
+  state: "active" | "released" | "expired" | "failed" | "hibernated";
   createdAt: string;
   updatedAt: string;
   lastTouchedAt?: string;
   expiresAt: string;
   releasedAt?: string;
   endedAt?: string;
+  extensions?: LeaseExtension[];
+  payer?: string;
+  sessionID?: string;
+  sessionKey?: string;
+  spendingLimitUSD?: number;
+  burnRateUSDPerMinute?: number;
+  highestVoucherHeldUSD?: number;
+  highestVoucherHeldUnits?: string;
+  billingStartedAt?: string;
+  paymentCoveredUntil?: string;
+  lastLiquidityCheckAt?: string;
+  settlementTx?: string;
+  settlementStatus?: "pending" | "submitted" | "failed" | "skipped";
+  settledAt?: string;
+  snapshotID?: string;
+  snapshotName?: string;
+  hibernatedAt?: string;
+  resumedFromSnapshotID?: string;
+  resumeRequest?: LeaseRequest;
+  sshPublicKey?: string;
 }
 
 export interface ProvisioningAttempt {
@@ -123,6 +159,7 @@ export interface ProviderImage {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  tag?: string;
 }
 
 export interface RunRecord {
@@ -241,6 +278,15 @@ export interface HetznerSSHKey {
   name: string;
   fingerprint: string;
   public_key: string;
+}
+
+export interface HetznerImage {
+  id: number;
+  description: string | null;
+  status: "creating" | "available" | "unavailable";
+  type: "snapshot" | "system" | "backup" | "app" | "temporary";
+  labels: Record<string, string>;
+  created: string;
 }
 
 export interface MachineView {

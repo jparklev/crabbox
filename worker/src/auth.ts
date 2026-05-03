@@ -9,10 +9,13 @@ const accessKeyCache = new Map<string, CryptoKey>();
 export interface AuthContext {
   authorized: boolean;
   admin: boolean;
-  auth: "bearer" | "github";
+  auth: "bearer" | "github" | "mpp" | "lease";
   owner: string;
   org: string;
   login?: string;
+  leaseID?: string;
+  /** 0x… wallet address that funded the request, if any. Independent of `owner`. */
+  payer?: string;
 }
 
 interface UserTokenPayload {
@@ -22,6 +25,8 @@ interface UserTokenPayload {
   login: string;
   name?: string;
   admin?: boolean;
+  /** Optional: scopes the bearer to a single lease ID (used for MPP-only sessions). */
+  leaseID?: string;
   exp: number;
   iat: number;
 }
@@ -61,18 +66,22 @@ export async function authenticateRequest(
       org: request.headers.get("x-crabbox-org") ?? env.CRABBOX_DEFAULT_ORG ?? "unknown",
     };
   }
-  const payload = await verifyUserToken(token, env).catch(() => undefined);
-  if (!payload) {
-    return undefined;
+  const userPayload = await verifyUserToken(token, env).catch(() => undefined);
+  if (userPayload) {
+    const ctx: AuthContext = {
+      authorized: true,
+      admin: userPayload.admin === true,
+      auth: userPayload.leaseID ? "lease" : "github",
+      owner: userPayload.owner,
+      org: userPayload.org,
+      login: userPayload.login,
+    };
+    if (userPayload.leaseID) {
+      ctx.leaseID = userPayload.leaseID;
+    }
+    return ctx;
   }
-  return {
-    authorized: true,
-    admin: payload.admin === true,
-    auth: "github",
-    owner: payload.owner,
-    org: payload.org,
-    login: payload.login,
-  };
+  return undefined;
 }
 
 export function requestWithAuthContext(request: Request, auth: AuthContext): Request {
@@ -88,7 +97,25 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   } else {
     headers.delete("x-crabbox-github-login");
   }
+  if (auth.leaseID) {
+    headers.set("x-crabbox-lease-id", auth.leaseID);
+  } else {
+    headers.delete("x-crabbox-lease-id");
+  }
+  if (auth.payer) {
+    headers.set("x-crabbox-payer", auth.payer);
+  } else {
+    headers.delete("x-crabbox-payer");
+  }
   return new Request(request, { headers });
+}
+
+export function requestLeaseAuth(request: Request): string {
+  return request.headers.get("x-crabbox-lease-id") ?? "";
+}
+
+export function requestPayer(request: Request): string {
+  return request.headers.get("x-crabbox-payer") ?? "";
 }
 
 export function isAdminRequest(request: Request): boolean {
@@ -122,6 +149,31 @@ export async function issueUserToken(
   return `${tokenPrefix}${encodedPayload}.${sig}`;
 }
 
+/**
+ * Issues a `cbxu_…` user token scoped to a single lease. Same shape as a
+ * normal user token, but with a `leaseID` claim and a tight TTL. Verification
+ * routes back through `verifyUserToken`; downstream visibility checks see
+ * `auth: "lease"` and `auth.leaseID` set so they can scope reads/writes.
+ */
+export async function issueLeaseToken(
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+  input: { leaseID: string; owner: string; org: string; ttlSeconds: number },
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const payload: UserTokenPayload = {
+    typ: "crabbox-user",
+    owner: input.owner,
+    org: input.org,
+    login: input.owner,
+    leaseID: input.leaseID,
+    iat: now,
+    exp: now + Math.max(60, Math.trunc(input.ttlSeconds)),
+  };
+  const encodedPayload = base64URL(encoder.encode(JSON.stringify(payload)));
+  const sig = await sign(encodedPayload, sessionSecret(env));
+  return `${tokenPrefix}${encodedPayload}.${sig}`;
+}
+
 async function verifyUserToken(
   token: string,
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
@@ -149,6 +201,9 @@ async function verifyUserToken(
     typeof payload.exp !== "number" ||
     payload.exp <= Math.floor(Date.now() / 1000)
   ) {
+    return undefined;
+  }
+  if (payload.leaseID !== undefined && !/^cbx_[a-f0-9]{12}$/.test(payload.leaseID)) {
     return undefined;
   }
   return payload as UserTokenPayload;

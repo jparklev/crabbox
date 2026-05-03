@@ -112,10 +112,10 @@ func TestCoordinatorMachineOrphanField(t *testing.T) {
 
 func TestHeartbeatInterval(t *testing.T) {
 	tests := map[time.Duration]time.Duration{
-		0:                time.Minute,
+		0:                15 * time.Second,
 		9 * time.Second:  5 * time.Second,
-		30 * time.Second: 10 * time.Second,
-		90 * time.Minute: time.Minute,
+		30 * time.Second: 15 * time.Second,
+		90 * time.Minute: 15 * time.Second,
 	}
 	for ttl, want := range tests {
 		if got := heartbeatInterval(ttl); got != want {

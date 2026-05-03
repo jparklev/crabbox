@@ -204,7 +204,8 @@ Flags:
 --profile <name>        profile to run on
 --class <name>          machine class override
 --type <name>           provider server or instance type override
---ttl <duration>        maximum lease lifetime, default 90m
+--allowance-usd <amount> coordinator Tempo session allowance, default 5
+--ttl <duration>        direct/non-metered maximum lifetime, default 90m
 --idle-timeout <duration> idle expiry, default 30m
 --no-sync               run without syncing
 --sync-only             sync and exit
@@ -378,6 +379,7 @@ CRABBOX_DEFAULT_CLASS
 CRABBOX_SERVER_TYPE
 CRABBOX_IDLE_TIMEOUT
 CRABBOX_TTL
+CRABBOX_ALLOWANCE_USD
 CRABBOX_SSH_KEY
 CRABBOX_SSH_USER
 CRABBOX_SSH_PORT

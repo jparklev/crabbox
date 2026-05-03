@@ -48,6 +48,7 @@ Flags:
 --market spot|on-demand
 --ttl <duration>
 --idle-timeout <duration>
+--allowance-usd <amount>
 --keep
 --no-sync
 --sync-only
@@ -64,7 +65,7 @@ Flags:
 --blacksmith-ref <ref>
 ```
 
-`--idle-timeout` controls inactivity expiry, default `30m`. `--ttl` remains the maximum wall-clock lifetime, default `90m`.
+`--allowance-usd` sets the coordinator Tempo session spending limit, default `$5`. `--idle-timeout` controls non-metered inactivity expiry, default `30m`. `--ttl` remains available for direct-provider cleanup labels and non-metered coordinators.
 Crabbox records a local repo claim for each reused lease. If a lease is already claimed by another repo, use `--reclaim` to move the claim intentionally.
 
 For AWS one-shot leases, `--market` overrides `capacity.market` for this run.
