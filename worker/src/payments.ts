@@ -37,7 +37,6 @@ export interface SessionOptions {
   scope: string;
   description: string;
   spendingLimitUSD: number;
-  minVoucherDeltaUSD?: number;
 }
 
 export class MppxConfigError extends Error {}
@@ -88,7 +87,7 @@ export function paymentGuardFromEnv(
       const response = await mppx.tempo.session({
         amount: formatAmountUSD(amountUSD),
         description: options.description,
-        minVoucherDelta: formatAmountUSD(options.minVoucherDeltaUSD ?? 0.000001),
+        minVoucherDelta: "0.000001",
         scope: options.scope,
         suggestedDeposit: formatAmountUSD(options.spendingLimitUSD),
         unitType: "usd",
