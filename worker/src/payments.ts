@@ -143,11 +143,8 @@ export function paymentGuardFromEnv(
 }
 
 export function paymentConfigured(env: Env): boolean {
-  if (!env.CRABBOX_MPP_RECIPIENT?.trim()) {
-    return false;
-  }
   try {
-    return Boolean(paymentGuardFromEnv(env));
+    return Boolean(env.CRABBOX_MPP_RECIPIENT?.trim() && paymentGuardFromEnv(env));
   } catch {
     return false;
   }
