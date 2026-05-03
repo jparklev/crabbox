@@ -4,12 +4,7 @@ import { leaseConfig, validCIDRs } from "./config";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute } from "./oauth";
-import {
-  isSessionChallenge,
-  paymentGuardFromEnv,
-  type PaymentGuard,
-  type SessionAcceptance,
-} from "./payments";
+import { paymentGuardFromEnv, type PaymentGuard, type SessionAcceptance } from "./payments";
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
 import type {
   Env,
@@ -219,7 +214,7 @@ export class FleetDurableObject implements DurableObject {
         scope: `lease:${leaseID}:create`,
         spendingLimitUSD,
       })(requestForPayment);
-      if (isSessionChallenge(session)) {
+      if ("challenge" in session) {
         return session.challenge;
       }
       acceptedSession = session.accepted;
@@ -399,7 +394,7 @@ export class FleetDurableObject implements DurableObject {
         scope: `lease:${lease.id}:resume`,
         spendingLimitUSD,
       })(requestForPayment);
-      if (isSessionChallenge(session)) {
+      if ("challenge" in session) {
         return session.challenge;
       }
       if (session.accepted) {
@@ -469,7 +464,7 @@ export class FleetDurableObject implements DurableObject {
       scope: `lease:${lease.id}:${action}`,
       spendingLimitUSD: lease.spendingLimitUSD ?? lease.maxEstimatedUSD ?? minUSD,
     })(request.clone());
-    if (isSessionChallenge(session)) {
+    if ("challenge" in session) {
       return session.challenge;
     }
     if (session.accepted) {

@@ -40,10 +40,6 @@ export interface SessionOptions {
   minVoucherDeltaUSD?: number;
 }
 
-export function isSessionChallenge(result: SessionResult): result is { challenge: Response } {
-  return "challenge" in result;
-}
-
 export class MppxConfigError extends Error {}
 
 export function paymentGuardFromEnv(
