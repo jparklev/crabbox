@@ -844,10 +844,8 @@ export class FleetDurableObject implements DurableObject {
       (lease) => !lease.sessionID && Date.parse(lease.expiresAt) <= nowMs,
     );
     const metered = active.filter((lease) => Boolean(lease.sessionID));
-    const uncovered = active.filter(
-      (lease) =>
-        Boolean(lease.sessionID) &&
-        voucherRequiredUSD(lease, now) > (lease.highestVoucherHeldUSD ?? 0) + 0.000001,
+    const uncovered = metered.filter(
+      (lease) => voucherRequiredUSD(lease, now) > (lease.highestVoucherHeldUSD ?? 0) + 0.000001,
     );
     const closing = await this.closeRequestedLeases(metered);
     const hibernating = [
@@ -902,11 +900,8 @@ export class FleetDurableObject implements DurableObject {
     }
     const checked = await Promise.all(
       leases.map(async (lease) => {
-        if (!lease.sessionID) {
-          return undefined;
-        }
-        const channel = await guard.channel(lease.sessionID).catch(() => undefined);
-        return channel && channel.closeRequestedAt > 0n ? lease : undefined;
+        const channel = await guard.channel(lease.sessionID ?? "").catch(() => undefined);
+        return channel?.closeRequestedAt ? lease : undefined;
       }),
     );
     return checked.filter((lease): lease is LeaseRecord => Boolean(lease));
