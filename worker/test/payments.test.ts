@@ -40,12 +40,6 @@ describe("paymentGuardFromEnv", () => {
     expect(() => paymentGuardFromEnv(env({ CRABBOX_MPP_CURRENCY: "" }))).toThrow(MppxConfigError);
   });
 
-  it("allows the bundled pathUSD default on testnet", () => {
-    expect(
-      paymentGuardFromEnv(env({ CRABBOX_MPP_CURRENCY: "", CRABBOX_MPP_TESTNET: "true" })),
-    ).toBeDefined();
-  });
-
   it("throws when MPP secret key is missing", () => {
     expect(() => paymentGuardFromEnv(env({ CRABBOX_MPP_SECRET_KEY: "" }))).toThrow(MppxConfigError);
   });

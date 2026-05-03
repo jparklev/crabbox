@@ -2,11 +2,9 @@ import { Mppx, Store, tempo } from "mppx/server";
 import { Session } from "mppx/tempo";
 import { createWalletClient, http, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { tempo as tempoChain, tempoTestnet } from "viem/chains";
+import { tempo as tempoChain } from "viem/chains";
 
 import type { Env } from "./types";
-
-const PATH_USD_TEMPO = "0x20c0000000000000000000000000000000000000";
 
 export type SessionCredentialPayload = {
   action?: string;
@@ -66,12 +64,10 @@ export function paymentGuardFromEnv(
   if (!isAddress(recipient)) {
     throw new MppxConfigError("CRABBOX_MPP_RECIPIENT must be a 0x… 20-byte address");
   }
-  const testnet = parseBool(env.CRABBOX_MPP_TESTNET);
-  const configuredCurrency = env.CRABBOX_MPP_CURRENCY?.trim();
-  if (!testnet && !configuredCurrency) {
-    throw new MppxConfigError("CRABBOX_MPP_CURRENCY is required on Tempo mainnet");
+  const currency = env.CRABBOX_MPP_CURRENCY?.trim();
+  if (!currency) {
+    throw new MppxConfigError("CRABBOX_MPP_CURRENCY is required when MPP is enabled");
   }
-  const currency = configuredCurrency || PATH_USD_TEMPO;
   if (!isAddress(currency)) {
     throw new MppxConfigError("CRABBOX_MPP_CURRENCY must be a 0x… 20-byte address");
   }
@@ -94,10 +90,9 @@ export function paymentGuardFromEnv(
   }
   const decimals = parseDecimals(env.CRABBOX_MPP_DECIMALS) ?? 6;
   const settlementAccount = privateKeyToAccount(settlementKey as Hex);
-  const chain = testnet ? tempoTestnet : tempoChain;
   const walletClient = createWalletClient({
     account: settlementAccount,
-    chain,
+    chain: tempoChain,
     transport: http(env.CRABBOX_MPP_RPC_URL?.trim() || undefined),
   });
   const store = storage ? doStorageStore(storage) : undefined;
@@ -107,7 +102,6 @@ export function paymentGuardFromEnv(
     currency,
     decimals,
     recipient,
-    ...(testnet ? { testnet } : {}),
     ...(store ? { store } : {}),
   };
   const secretKey = env.CRABBOX_MPP_SECRET_KEY;
@@ -254,10 +248,6 @@ function parseDecimals(value: string | undefined): number | undefined {
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 32 ? parsed : undefined;
-}
-
-function parseBool(value: string | undefined): boolean {
-  return value === "1" || value === "true" || value === "yes";
 }
 
 function isAddress(value: string): value is `0x${string}` {

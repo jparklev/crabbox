@@ -23,22 +23,19 @@ Set the following Worker secrets / vars:
 
 ```text
 CRABBOX_MPP_RECIPIENT                0x... wallet that receives settlement
-CRABBOX_MPP_CURRENCY                 0x... TIP-20 token contract (default: pathUSD)
+CRABBOX_MPP_CURRENCY                 0x... TIP-20 token contract
 CRABBOX_MPP_DECIMALS                 integer 0-32 (default: 6)
 CRABBOX_MPP_SECRET_KEY               HMAC secret binding challenges to their contents
 CRABBOX_MPP_SETTLEMENT_PRIVATE_KEY   0x... broker key used to settle session vouchers
 CRABBOX_MPP_RPC_URL                  optional Tempo RPC override
-CRABBOX_MPP_TESTNET                  "1" / "true" to use Tempo testnet
 CRABBOX_MPP_REALM                    override the auto-detected realm
 ```
 
 If `CRABBOX_MPP_RECIPIENT` is unset, the lease endpoint behaves as a normal
 authenticated coordinator endpoint.
 
-Mainnet deployments must set `CRABBOX_MPP_CURRENCY` explicitly so the broker
-cannot accidentally open channels against a testnet token. Testnet deployments
-may leave it unset; `CRABBOX_MPP_TESTNET=true` opts into the bundled pathUSD
-testnet default.
+Deployments must set `CRABBOX_MPP_CURRENCY` explicitly so the broker opens
+channels against the intended token.
 
 ## Wire Format
 

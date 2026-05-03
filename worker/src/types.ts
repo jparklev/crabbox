@@ -38,7 +38,6 @@ export interface Env {
   CRABBOX_MPP_SECRET_KEY?: string;
   CRABBOX_MPP_SETTLEMENT_PRIVATE_KEY?: string;
   CRABBOX_MPP_RPC_URL?: string;
-  CRABBOX_MPP_TESTNET?: string;
   CRABBOX_MPP_REALM?: string;
 }
 
